@@ -1,36 +1,48 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# ResumeWise
+
+A local-first resume editor that lets you import, edit, and enhance PDF resumes with AI — all in your browser.
+
+## Features
+
+- **PDF Import** — Upload any PDF resume; text, fonts, colors, and layout are preserved
+- **Rich Text Editing** — Full formatting: font family (1600+ Google Fonts), weight (100–900), size, color, alignment, bold/italic/underline/strikethrough, links
+- **Real Pagination** — Each page is a separate editor; content automatically reflows between pages
+- **AI Assistance** — Chat panel and inline selection bar powered by your own API key
+  - Supports Anthropic, OpenAI, Gemini, Grok, and OpenRouter
+  - AI can directly edit your resume via tool calls (find/replace, insert, delete, format)
+- **Document Management** — Multiple documents, duplicates, and variants in a sidebar tree
+- **Local-First** — Everything stored in IndexedDB. No accounts, no server-side storage. Your API key stays in `localStorage`
+- **Export** — Print to PDF via `Cmd+P` / `Ctrl+P`
 
 ## Getting Started
 
-First, run the development server:
-
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000).
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Usage
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+1. **Upload a PDF** or create a blank document
+2. **Edit** text directly in the paginated editor
+3. **Format** using the right sidebar (Text panel) — fonts, sizes, weights, colors, alignment
+4. **Use AI** by switching to the AI tab in the right sidebar:
+   - Enter your API key (auto-detected provider)
+   - Chat about your resume; ask for improvements
+   - AI uses tools to edit your resume directly
+5. **Quick AI** — Select text to see the floating bar: ask a question or click "Improve"
+6. **Export** — Click Export or `Cmd+S` to save, `Cmd+P` to print/PDF
 
-## Learn More
+## Tech Stack
 
-To learn more about Next.js, take a look at the following resources:
+- [Next.js 16](https://nextjs.org/) + [React 19](https://react.dev/)
+- [TipTap](https://tiptap.dev/) (ProseMirror) for rich text editing
+- [Tailwind CSS 4](https://tailwindcss.com/) + [shadcn/ui](https://ui.shadcn.com/)
+- [pdf2json](https://github.com/nickolasburr/pdf2json) for PDF parsing
+- IndexedDB for persistence
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## License
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Private.

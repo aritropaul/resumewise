@@ -128,3 +128,121 @@
     @apply font-sans;
   }
 }
+
+/* Sonner toast overrides */
+[data-sonner-toaster] {
+  --width: 300px !important;
+}
+
+[data-sonner-toast] {
+  animation: toast-in 0.25s ease-out !important;
+  white-space: nowrap !important;
+}
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(-8px) scale(0.96); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+.animate-blink {
+  animation: blink 1s step-end infinite;
+}
+
+/* ProseMirror / TipTap editor styles */
+.ProseMirror {
+  outline: none;
+  min-height: 100%;
+  font-family: Helvetica, Arial, sans-serif;
+  font-feature-settings: "liga" 1, "clig" 1, "kern" 1, "calt" 1;
+  font-variant-ligatures: common-ligatures contextual;
+  font-kerning: normal;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+.ProseMirror p {
+  margin: 0;
+}
+
+.ProseMirror a,
+.ProseMirror a:visited,
+.ProseMirror a:hover,
+.ProseMirror a:active {
+  color: #2563eb !important;
+  text-decoration: underline;
+  text-decoration-color: #2563eb;
+  cursor: pointer;
+}
+
+.ProseMirror strong {
+  font-weight: 700;
+}
+
+.ProseMirror em {
+  font-style: italic;
+}
+
+.ProseMirror u {
+  text-decoration: underline;
+}
+
+/* Hide native selection, use custom decoration instead */
+.ProseMirror ::selection {
+  background-color: transparent !important;
+}
+.ProseMirror *::selection {
+  background-color: transparent !important;
+}
+
+.ProseMirror .custom-selection {
+  background-color: rgba(37, 99, 235, 0.2) !important;
+}
+
+.ProseMirror:focus {
+  outline: none;
+}
+
+/* Print / Export styles */
+@media print {
+  @page { size: 612px 792px; margin: 0; }
+
+  /* Reset all layout constraints */
+  html, body { height: auto !important; overflow: visible !important; background: white !important; margin: 0 !important; }
+  body > div { height: auto !important; overflow: visible !important; }
+  body > div > div { height: auto !important; overflow: visible !important; }
+
+  /* Hide sidebars and floating buttons */
+  [data-print-hide] { display: none !important; width: 0 !important; }
+
+  /* Make center area flow naturally */
+  [data-print-pages],
+  [data-print-pages] > * {
+    height: auto !important;
+    overflow: visible !important;
+    background: white !important;
+    position: static !important;
+  }
+
+  /* Pages container: no padding, no gap */
+  [data-print-pages] > * > div {
+    padding: 0 !important;
+    gap: 0 !important;
+  }
+
+  /* Each page: clean, one per printed page */
+  [data-print-page] {
+    box-shadow: none !important;
+    border-radius: 0 !important;
+    break-after: page;
+    margin: 0 !important;
+  }
+
+  /* Hide selection decorations */
+  .ProseMirror .custom-selection { background: transparent !important; }
+}
