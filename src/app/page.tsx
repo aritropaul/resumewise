@@ -1,22 +1,71 @@
 "use client";
 
-import { useState, useCallback, useRef, useEffect } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import dynamic from "next/dynamic";
-import type { Editor } from "@tiptap/react";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Separator } from "@/components/ui/separator";
-import { Download, Save, Upload } from "lucide-react";
+import {
+  Sidebar,
+  SidebarSimple,
+  Sun,
+  MoonStars,
+  DownloadSimple,
+  MagnifyingGlass,
+  FileText,
+  UploadSimple,
+  Plus,
+  Sparkle,
+  Keyboard,
+} from "@phosphor-icons/react";
 import { toast } from "sonner";
-import { loadAllDocuments, saveDocument, deleteDocument, duplicateDocument, type SavedDocument } from "@/lib/storage";
+import { Button } from "@/components/ui/button";
+import { IconButton } from "@/components/ui/icon-button";
+import { Badge } from "@/components/ui/badge";
+import { Kbd } from "@/components/ui/kbd";
+import { Tabs, TabsList, TabsTab, TabsPanel } from "@/components/ui/tabs";
+import { CircularLoader } from "@/components/ui/loader";
+import { ResumePageSkeleton } from "@/components/ui/skeleton";
+import { TemplatePicker } from "@/components/template-picker";
+import { CommandPalette } from "@/components/command-palette";
+import { ShortcutSheet } from "@/components/shortcut-sheet";
+import {
+  loadAllDocuments,
+  saveDocument,
+  deleteDocument,
+  duplicateDocument,
+  createVariantDocument,
+  createBlankDocument,
+  consumeDroppedLegacyCount,
+  isVariantDocument,
+  type SavedDocument,
+} from "@/lib/storage";
+import { useResumeStore } from "@/lib/resume-store";
+import { DocEditorPanel } from "@/components/doc-editor-panel";
+import { downloadResumePdf } from "@/lib/download-pdf";
+import { getApiKey } from "@/lib/ai";
+import { cn } from "@/lib/utils";
+import { JobPanel, type SuggestionStatus } from "@/components/job-panel";
+import {
+  buildVariantName,
+  extractJobMetadata,
+  getVariantState,
+  syncDocumentJobMetadata,
+} from "@/lib/variant-workflow";
+import {
+  analyzeFit,
+  fetchJobFromUrl,
+  markdownHash,
+  readCache,
+  summariseJob,
+  type FitAnalysis,
+} from "@/lib/fit-analyzer";
+import { applySuggestion } from "@/lib/apply-suggestion";
 
-const ResumeEditor = dynamic(
-  () => import("@/components/resume-editor").then((m) => m.ResumeEditor),
-  { ssr: false, loading: () => <div className="flex-1 flex items-center justify-center bg-[#f6f6f6]"><p className="text-sm text-black/40">Loading editor...</p></div> }
+const CenterTabs = dynamic(
+  () => import("@/components/center-tabs").then((m) => m.CenterTabs),
+  { ssr: false, loading: () => <ResumePageSkeleton /> }
 );
 
-const TextPanel = dynamic(
-  () => import("@/components/text-panel").then((m) => m.TextPanel),
+const DocSidebar = dynamic(
+  () => import("@/components/doc-sidebar").then((m) => m.DocSidebar),
   { ssr: false }
 );
 
@@ -25,463 +74,1061 @@ const AiPanel = dynamic(
   { ssr: false }
 );
 
-const SelectionBar = dynamic(
-  () => import("@/components/selection-bar").then((m) => m.SelectionBar),
-  { ssr: false }
-);
-
-const DocSidebar = dynamic(
-  () => import("@/components/doc-sidebar").then((m) => m.DocSidebar),
-  { ssr: false }
-);
-
-const DEFAULT_MARGINS = { top: 48, right: 56, bottom: 48, left: 56 };
-
-// Collect editor content as merged ProseMirror JSON (preserves nbsp exactly)
-function collectEditorJson(editors: Editor[]): Record<string, unknown> | null {
-  if (editors.length === 0) return null;
-  const allContent = editors.flatMap((e) => {
-    const json = e.getJSON();
-    return (json.content as Record<string, unknown>[]) || [];
-  });
-  return { type: "doc", content: allContent };
-}
+type RightTab = "design" | "ai" | "job";
+type SaveState = "idle" | "saving" | "saved";
+type CenterTab = "edit" | "preview";
 
 export default function Home() {
   const [files, setFiles] = useState<SavedDocument[]>([]);
-  const [activeId, setActiveId] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [loadingDocs, setLoadingDocs] = useState(true);
+  const [rightTab, setRightTab] = useState<RightTab>("design");
   const [leftOpen, setLeftOpen] = useState(true);
   const [rightOpen, setRightOpen] = useState(true);
-  const [rightTab, setRightTab] = useState<"editor" | "ai">("editor");
-  const [editor, setEditor] = useState<Editor | null>(null);
-  const [allEditors, setAllEditors] = useState<Editor[]>([]);
-  const setFullContentRef = useRef<((json: Record<string, unknown>) => void) | null>(null);
-  const saveLockRef = useRef(false); // Lock auto-save during AI tool execution
+  const [theme, setTheme] = useState<"light" | "dark">("light");
+  const [isDownloading, setIsDownloading] = useState(false);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [shortcutOpen, setShortcutOpen] = useState(false);
+  const [saveState, setSaveState] = useState<SaveState>("idle");
+  const [savedAgo, setSavedAgo] = useState<number | null>(null);
+  const [rightTabByDoc, setRightTabByDoc] = useState<
+    Partial<Record<string, RightTab>>
+  >({});
+  const [centerTabByDoc, setCenterTabByDoc] = useState<
+    Partial<Record<string, CenterTab>>
+  >({});
+  const [fitAnalysis, setFitAnalysis] = useState<FitAnalysis | null>(null);
+  const [fitAnalysisKey, setFitAnalysisKey] = useState<{
+    docId: string;
+    jobKey: string | null;
+    markdownHash: string;
+  } | null>(null);
+  const [fitLoading, setFitLoading] = useState(false);
+  const [fitError, setFitError] = useState<string | null>(null);
+  const [urlFetchLoading, setUrlFetchLoading] = useState(false);
+  const [urlFetchError, setUrlFetchError] = useState<string | null>(null);
+  const [summaryLoading, setSummaryLoading] = useState(false);
+  const [suggestionStatus, setSuggestionStatus] = useState<
+    Record<number, SuggestionStatus>
+  >({});
+
   const fileInputRef = useRef<HTMLInputElement>(null);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const savedAtRef = useRef<number | null>(null);
   const filesRef = useRef(files);
   filesRef.current = files;
-  const activeIdRef = useRef(activeId);
-  activeIdRef.current = activeId;
-  const allEditorsRef = useRef(allEditors);
-  allEditorsRef.current = allEditors;
 
+  const store = useResumeStore();
+  const { markdown, activeId, theme: resumeTheme, template } = store;
   const activeFile = files.find((f) => f.id === activeId) ?? null;
-  const margins = activeFile?.margins ?? DEFAULT_MARGINS;
-  const activeContent = activeFile?.editorJson || activeFile?.htmlContent || "";
+  const jobDescription = activeFile?.jobDescription ?? null;
+  const centerTab: CenterTab = activeId
+    ? (centerTabByDoc[activeId] ?? "edit")
+    : "edit";
 
-  // Load documents from IndexedDB on mount
   useEffect(() => {
-    loadAllDocuments().then((docs) => {
-      if (docs.length > 0) {
-        setFiles(docs);
-        setActiveId(docs[0].id);
-      }
-    });
+    if (typeof document === "undefined") return;
+    setTheme(document.documentElement.classList.contains("dark") ? "dark" : "light");
   }, []);
 
-  // Save current editor state to IndexedDB only (no React state update to avoid editor recreation)
-  const persistToDb = useCallback(() => {
-    const id = activeIdRef.current;
-    const editors = allEditorsRef.current;
-    if (!id || editors.length === 0) return;
-    const alive = editors.every((e) => { try { return !!e.view?.dom; } catch { return false; } });
-    if (!alive) return;
-    const doc = filesRef.current.find((f) => f.id === id);
-    if (!doc) return;
-    const json = collectEditorJson(editors);
-    saveDocument({ ...doc, editorJson: json });
-  }, []);
-
-  // Save and update React state — only used when switching documents
-  const persistCurrent = useCallback(() => {
-    const id = activeIdRef.current;
-    const editors = allEditorsRef.current;
-    if (!id || editors.length === 0) return;
-    const alive = editors.every((e) => { try { return !!e.view?.dom; } catch { return false; } });
-    if (!alive) return;
-    const doc = filesRef.current.find((f) => f.id === id);
-    if (!doc) return;
-    const json = collectEditorJson(editors);
-    const updated = { ...doc, editorJson: json };
-    saveDocument(updated);
-    setFiles((prev) => prev.map((f) => (f.id === id ? updated : f)));
-  }, []);
-
-  // Manual save (Cmd+S)
-  const saveNow = useCallback(() => {
-    if (!activeIdRef.current || allEditorsRef.current.length === 0) return;
-    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-    persistToDb();
-    toast.success("Saved");
-  }, [persistToDb]);
-
-  // Auto-save: write to IndexedDB only — NO React state update (avoids editor recreation)
   useEffect(() => {
-    if (allEditors.length === 0) return;
-
-    const handleUpdate = () => {
-      if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-      saveTimerRef.current = setTimeout(() => {
-        persistToDb();
-      }, 1000);
-    };
-
-    allEditors.forEach((e) => e.on("update", handleUpdate));
-    return () => {
-      allEditors.forEach((e) => e.off("update", handleUpdate));
-      if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-    };
-  }, [allEditors, persistToDb]);
-
-  // Cmd+S keyboard shortcut
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === "s") {
-        e.preventDefault();
-        saveNow();
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [saveNow]);
-
-  const setMargins = useCallback(
-    (newMargins: typeof DEFAULT_MARGINS) => {
-      if (!activeId) return;
-      setFiles((prev) =>
-        prev.map((f) => {
-          if (f.id !== activeId) return f;
-          const updated = { ...f, margins: newMargins };
-          saveDocument(updated);
-          return updated;
-        })
-      );
-    },
-    [activeId]
-  );
-
-  const handleMarginChange = useCallback(
-    (side: "top" | "right" | "bottom" | "left", value: number) => {
-      if (!activeId) return;
-      setFiles((prev) =>
-        prev.map((f) => {
-          if (f.id !== activeId) return f;
-          const updated = { ...f, margins: { ...f.margins, [side]: value } };
-          saveDocument(updated);
-          return updated;
-        })
-      );
-    },
-    [activeId]
-  );
-
-  const handleFileUpload = useCallback(async (file: File) => {
-    setLoading(true);
+    if (typeof document === "undefined") return;
+    document.documentElement.classList.toggle("dark", theme === "dark");
     try {
-      const formData = new FormData();
-      formData.append("file", file);
-      const res = await fetch("/api/parse", { method: "POST", body: formData });
-      if (!res.ok) throw new Error("Parse failed");
-      const { html } = await res.json();
+      localStorage.setItem("theme", theme);
+    } catch {}
+  }, [theme]);
 
-      const newDoc: SavedDocument = {
-        id: crypto.randomUUID(),
-        name: file.name,
-        date: new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" }),
-        htmlContent: html,
-        margins: { ...DEFAULT_MARGINS },
-      };
-      await saveDocument(newDoc);
-      persistCurrent();
-      setFiles((prev) => [...prev, newDoc]);
-      setActiveId(newDoc.id);
-      toast.success(`Imported ${file.name}`);
-    } catch (err) {
-      console.error("Failed to parse PDF:", err);
-      toast.error("Failed to parse PDF");
-    } finally {
-      setLoading(false);
+  useEffect(() => {
+    (async () => {
+      setLoadingDocs(true);
+      try {
+        const all = await loadAllDocuments();
+        all.sort((a, b) => a.name.localeCompare(b.name));
+        setFiles(all);
+        if (all.length > 0) {
+          const first = all[0];
+          store.setActive(first.id, {
+            markdown: first.markdown,
+            theme: first.theme,
+            template: first.template,
+          });
+        }
+        const dropped = consumeDroppedLegacyCount();
+        if (dropped > 0) {
+          toast.message(
+            `cleared ${dropped} saved resume${dropped === 1 ? "" : "s"}`,
+            {
+              description:
+                "saved resumes from the prior version were dropped. re-import your pdf to use the new editor.",
+            }
+          );
+        }
+      } catch (e) {
+        console.error("Failed to load documents", e);
+      } finally {
+        setLoadingDocs(false);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Autosave whenever the store's markdown/theme/template drift from the file.
+  useEffect(() => {
+    if (!activeId) return;
+    const file = filesRef.current.find((f) => f.id === activeId);
+    if (!file) return;
+    if (
+      file.markdown === markdown &&
+      file.theme === resumeTheme &&
+      file.template === template
+    ) {
+      return;
     }
-  }, [persistCurrent]);
+    const next: SavedDocument = {
+      ...file,
+      markdown,
+      theme: resumeTheme,
+      template,
+    };
+    setFiles((prev) => prev.map((f) => (f.id === activeId ? next : f)));
+    setSaveState("saving");
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = setTimeout(() => {
+      saveDocument(next)
+        .then(() => {
+          savedAtRef.current = Date.now();
+          setSavedAgo(0);
+          setSaveState("saved");
+        })
+        .catch((e) => {
+          console.error("Save failed", e);
+          setSaveState("idle");
+        });
+    }, 600);
+  }, [markdown, resumeTheme, template, activeId]);
 
-  const switchDocument = useCallback((id: string) => {
-    persistCurrent();
-    setActiveId(id);
-  }, [persistCurrent]);
+  useEffect(() => {
+    if (saveState !== "saved") return;
+    const id = setInterval(() => {
+      if (!savedAtRef.current) return;
+      setSavedAgo(Math.floor((Date.now() - savedAtRef.current) / 1000));
+    }, 1000);
+    return () => clearInterval(id);
+  }, [saveState]);
+
+  const setInspectorTab = useCallback(
+    (tab: RightTab) => {
+      setRightTab(tab);
+      if (!activeId) return;
+      setRightTabByDoc((prev) => ({ ...prev, [activeId]: tab }));
+    },
+    [activeId]
+  );
+
+  const setCenterTab = useCallback(
+    (tab: CenterTab) => {
+      if (!activeId) return;
+      setCenterTabByDoc((prev) => ({ ...prev, [activeId]: tab }));
+    },
+    [activeId]
+  );
+
+  useEffect(() => {
+    if (!activeId) return;
+    setRightTab(rightTabByDoc[activeId] ?? "design");
+  }, [activeId, rightTabByDoc]);
+
+  useEffect(() => {
+    if (!activeId) return;
+    const doc = filesRef.current.find((f) => f.id === activeId);
+    if (!doc) return;
+    // Rehydrate a cached analysis if it still matches the current doc+JD+markdown.
+    const cached = readCache({
+      jobKey: doc.jobKey ?? null,
+      markdownHash: markdownHash(doc.markdown),
+    });
+    if (cached) {
+      setFitAnalysis(cached);
+      setFitAnalysisKey({
+        docId: doc.id,
+        jobKey: doc.jobKey ?? null,
+        markdownHash: markdownHash(doc.markdown),
+      });
+    } else {
+      setFitAnalysis(null);
+      setFitAnalysisKey(null);
+    }
+    setSuggestionStatus({});
+    setFitError(null);
+    setUrlFetchError(null);
+  }, [activeId]);
+
+  const activateDoc = useCallback(
+    (doc: SavedDocument) => {
+      store.setActive(doc.id, {
+        markdown: doc.markdown,
+        theme: doc.theme,
+        template: doc.template,
+      });
+    },
+    [store]
+  );
+
+  const handleSelect = useCallback(
+    (id: string) => {
+      const doc = filesRef.current.find((f) => f.id === id);
+      if (doc) activateDoc(doc);
+    },
+    [activateDoc]
+  );
 
   const handleCreateBlank = useCallback(() => {
-    const newDoc: SavedDocument = {
-      id: crypto.randomUUID(),
-      name: "Untitled Resume",
-      date: new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" }),
-      htmlContent: "",
-      margins: { ...DEFAULT_MARGINS },
-    };
-    saveDocument(newDoc);
-    persistCurrent();
-    setFiles((prev) => [...prev, newDoc]);
-    setActiveId(newDoc.id);
-  }, [persistCurrent]);
+    const doc = createBlankDocument("untitled resume");
+    saveDocument(doc).catch((e) => console.error("Save failed", e));
+    setFiles((prev) => [...prev, doc]);
+    activateDoc(doc);
+  }, [activateDoc]);
 
-  const handleDuplicate = useCallback(
-    (id: string, asVariant: boolean) => {
-      const doc = filesRef.current.find((f) => f.id === id);
-      if (!doc) return;
+  const handleUpload = useCallback(() => {
+    fileInputRef.current?.click();
+  }, []);
 
-      // If duplicating as variant, the parent is the base (either the doc itself if it's a base, or its parent)
-      const parentId = asVariant ? (doc.parentId || doc.id) : doc.parentId;
-      const baseName = doc.name.replace(/\.pdf$/i, "");
-      const newName = asVariant ? `${baseName} — variant` : `${baseName} (copy)`;
-      const dup = duplicateDocument(doc, newName, parentId);
-      saveDocument(dup);
-      setFiles((prev) => [...prev, dup]);
-      setActiveId(dup.id);
+  const handleFileChosen = useCallback(
+    async (file: File) => {
+      if (!file) return;
+      const baseName = file.name.replace(/\.pdf$/i, "");
+      const importToast = toast.loading(`importing ${baseName}…`);
+      try {
+        const fd = new FormData();
+        fd.append("file", file);
+        const parseRes = await fetch("/api/parse", { method: "POST", body: fd });
+        if (!parseRes.ok) {
+          const err = await parseRes.json().catch(() => ({ error: "parse failed" }));
+          throw new Error(err.error || "parse failed");
+        }
+        const { text } = (await parseRes.json()) as { text: string };
+
+        const importRes = await fetch("/api/import", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ apiKey: getApiKey() || undefined, text }),
+        });
+        if (!importRes.ok) {
+          const err = await importRes.json().catch(() => ({ error: "import failed" }));
+          throw new Error(err.error || "import failed");
+        }
+        const { markdown: importedMd } = (await importRes.json()) as {
+          markdown: string;
+        };
+
+        const doc = createBlankDocument(baseName);
+        doc.markdown = importedMd;
+        await saveDocument(doc);
+        setFiles((prev) => [...prev, doc]);
+        activateDoc(doc);
+        toast.success(`imported ${baseName}`, { id: importToast });
+      } catch (e) {
+        console.error("Import failed", e);
+        toast.error(`import failed: ${(e as Error).message}`, { id: importToast });
+      }
     },
-    []
+    [activateDoc]
   );
 
-  const handleRename = useCallback((id: string, newName: string) => {
+  const handleRename = useCallback((id: string, name: string) => {
     setFiles((prev) =>
       prev.map((f) => {
         if (f.id !== id) return f;
-        const updated = { ...f, name: newName };
-        saveDocument(updated);
-        return updated;
+        const next = { ...f, name };
+        saveDocument(next).catch((e) => console.error("Save failed", e));
+        return next;
       })
     );
   }, []);
 
+  const handleDuplicate = useCallback(
+    (id: string, asVariant: boolean) => {
+      const src = filesRef.current.find((f) => f.id === id);
+      if (!src) return;
+      const sourceDoc: SavedDocument =
+        src.id === activeId
+          ? { ...src, markdown, theme: resumeTheme, template }
+          : src;
+      const metadata = extractJobMetadata(sourceDoc.jobDescription);
+      const dup = asVariant
+        ? createVariantDocument(
+            sourceDoc,
+            buildVariantName(sourceDoc.name, metadata),
+            sourceDoc.jobDescription
+          )
+        : duplicateDocument(
+            sourceDoc,
+            `${src.name.replace(/\.pdf$/i, "")} (copy)`,
+            null
+          );
+      saveDocument(dup).catch((e) => console.error("Save failed", e));
+      setFiles((prev) => [...prev, dup]);
+      activateDoc(dup);
+    },
+    [activeId, markdown, resumeTheme, template, activateDoc]
+  );
+
   const handleDelete = useCallback(
     (id: string) => {
-      const doc = filesRef.current.find((f) => f.id === id);
-      if (!doc) return;
+      const target = filesRef.current.find((f) => f.id === id);
+      if (!target) return;
+      const ids = [
+        id,
+        ...filesRef.current.filter((f) => f.parentId === id).map((f) => f.id),
+      ];
+      const snapshot = filesRef.current.filter((f) => ids.includes(f.id));
+      const label = target.name.replace(/\.pdf$/i, "") || "untitled";
 
-      // If it's a base, also delete its variants
-      const idsToDelete = [id];
-      if (!doc.parentId) {
-        filesRef.current.forEach((f) => {
-          if (f.parentId === id) idsToDelete.push(f.id);
-        });
+      setFiles((prev) => prev.filter((f) => !ids.includes(f.id)));
+      if (ids.includes(activeId ?? "")) {
+        const remaining = filesRef.current.filter((f) => !ids.includes(f.id));
+        const nextDoc = remaining[0];
+        if (nextDoc) activateDoc(nextDoc);
+        else store.setActive(null, null);
       }
 
-      idsToDelete.forEach((did) => deleteDocument(did));
-      setFiles((prev) => prev.filter((f) => !idsToDelete.includes(f.id)));
+      let undone = false;
+      toast(`deleted ${label}`, {
+        description: ids.length > 1 ? `${ids.length - 1} variants also removed` : undefined,
+        action: {
+          label: "undo",
+          onClick: () => {
+            undone = true;
+            setFiles((prev) => {
+              const byId = new Set(prev.map((p) => p.id));
+              const restored = snapshot.filter((s) => !byId.has(s.id));
+              return [...prev, ...restored];
+            });
+          },
+        },
+        duration: 6000,
+      });
 
-      // If we deleted the active doc, pick another
-      if (activeId && idsToDelete.includes(activeId)) {
-        const remaining = filesRef.current.filter((f) => !idsToDelete.includes(f.id));
-        setActiveId(remaining.length > 0 ? remaining[0].id : null);
-      }
+      setTimeout(() => {
+        if (undone) return;
+        Promise.all(ids.map((i) => deleteDocument(i))).catch((e) =>
+          console.error("Delete failed", e)
+        );
+      }, 6000);
     },
-    [activeId]
+    [activeId, activateDoc, store]
   );
 
   const handleToggleCollapse = useCallback((id: string) => {
     setFiles((prev) =>
       prev.map((f) => {
         if (f.id !== id) return f;
-        const updated = { ...f, collapsed: !f.collapsed };
-        saveDocument(updated);
-        return updated;
+        const next = { ...f, collapsed: !f.collapsed };
+        saveDocument(next).catch((e) => console.error("Save failed", e));
+        return next;
       })
     );
   }, []);
 
-  const handleExport = useCallback(() => {
-    window.print();
+  const handleDownload = useCallback(async () => {
+    if (!activeFile) return;
+    setIsDownloading(true);
+    try {
+      await downloadResumePdf(
+        { markdown, theme: resumeTheme, template },
+        activeFile.name
+      );
+    } catch (e) {
+      console.error("Download failed", e);
+      toast.error("download failed");
+    } finally {
+      setIsDownloading(false);
+    }
+  }, [activeFile, markdown, resumeTheme, template]);
+
+  const handleJobChange = useCallback(
+    (value: string) => {
+      if (!activeId) return;
+      setFiles((prev) =>
+        prev.map((f) => {
+          if (f.id !== activeId) return f;
+          return syncDocumentJobMetadata({ ...f, jobDescription: value });
+        })
+      );
+      setSaveState("saving");
+      if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = setTimeout(() => {
+        const current = filesRef.current.find((f) => f.id === activeId);
+        if (!current) return;
+        saveDocument(current)
+          .then(() => {
+            savedAtRef.current = Date.now();
+            setSavedAgo(0);
+            setSaveState("saved");
+          })
+          .catch((e) => console.error("Save failed", e));
+      }, 600);
+    },
+    [activeId]
+  );
+
+  // Fork a fresh variant the first time the AI tab (or selection popover)
+  // touches a base doc. If the active doc is already a variant, stay put — per
+  // product rule, subsequent AI edits mutate in place.
+  const ensureAiFork = useCallback(async () => {
+    if (!activeFile) return null;
+    if (isVariantDocument(activeFile)) {
+      return activeFile;
+    }
+    const sourceDoc: SavedDocument = {
+      ...activeFile,
+      markdown,
+      theme: resumeTheme,
+      template,
+    };
+    const variant = createVariantDocument(
+      sourceDoc,
+      `${sourceDoc.name.replace(/\.pdf$/i, "")} — draft`,
+      sourceDoc.jobDescription ?? null
+    );
+    try {
+      await saveDocument(variant);
+    } catch (e) {
+      console.error("Save failed", e);
+      toast.error("couldn't save variant");
+      return null;
+    }
+    setFiles((prev) => [...prev, variant]);
+    activateDoc(variant);
+    toast.success(`forked variant for ai edits`);
+    return variant;
+  }, [activeFile, markdown, resumeTheme, template, activateDoc]);
+
+  const openAiTab = useCallback(() => {
+    setInspectorTab("ai");
+  }, [setInspectorTab]);
+
+  const ensureVariantForJob = useCallback(async () => {
+    if (!activeFile) return null;
+    const trimmed = activeFile.jobDescription?.trim();
+    if (!trimmed) {
+      toast.error("paste the job description before tailoring");
+      return null;
+    }
+
+    const sourceDoc = syncDocumentJobMetadata(
+      { ...activeFile, markdown, theme: resumeTheme, template },
+      trimmed
+    );
+
+    if (isVariantDocument(sourceDoc)) {
+      await saveDocument(sourceDoc);
+      setFiles((prev) =>
+        prev.map((file) => (file.id === sourceDoc.id ? sourceDoc : file))
+      );
+      activateDoc(sourceDoc);
+      toast.success("continuing the active tailored variant");
+      return sourceDoc;
+    }
+
+    const state = getVariantState(sourceDoc, filesRef.current, trimmed);
+    if (state.matchingVariant) {
+      const match = syncDocumentJobMetadata(
+        { ...state.matchingVariant, jobDescription: trimmed },
+        trimmed
+      );
+      await saveDocument(match);
+      setFiles((prev) => prev.map((f) => (f.id === match.id ? match : f)));
+      activateDoc(match);
+      toast.success("opened the existing tailored variant");
+      return match;
+    }
+
+    const metadata = extractJobMetadata(trimmed);
+    const authoritative =
+      sourceDoc.jobSource === "greenhouse" || sourceDoc.jobSource === "ashby"
+        ? { jobTitle: sourceDoc.jobTitle, company: sourceDoc.company }
+        : undefined;
+    const created = syncDocumentJobMetadata(
+      createVariantDocument(
+        sourceDoc,
+        buildVariantName(sourceDoc.name, metadata, authoritative),
+        trimmed
+      ),
+      trimmed
+    );
+    await saveDocument(created);
+    setFiles((prev) => [...prev, created]);
+    activateDoc(created);
+    toast.success("created a tailored variant");
+    return created;
+  }, [activeFile, markdown, resumeTheme, template, activateDoc]);
+
+  const queueAiWorkflow = useCallback(
+    (mode: "idle" | "analyze" | "tailor", prompt: string) => {
+      setInspectorTab("ai");
+      store.setAiWorkflowMode(mode);
+      store.setAiPrefill(prompt);
+    },
+    [setInspectorTab, store]
+  );
+
+  const handleFetchJobUrl = useCallback(
+    async (source: "greenhouse" | "ashby", url: string) => {
+      if (!activeId) return;
+      setUrlFetchError(null);
+      setUrlFetchLoading(true);
+      try {
+        const result = await fetchJobFromUrl(url);
+        if (result.source !== source) {
+          toast.message(
+            `loaded from ${result.source} instead of ${source}`
+          );
+        }
+        setFiles((prev) =>
+          prev.map((f) => {
+            if (f.id !== activeId) return f;
+            return syncDocumentJobMetadata(
+              { ...f, jobDescription: result.text, jobSummary: null },
+              result.text,
+              {
+                jobTitle: result.title,
+                company: result.company,
+                jobSource: result.source,
+                jobSourceUrl: result.sourceUrl,
+              }
+            );
+          })
+        );
+        setSaveState("saving");
+        if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = setTimeout(() => {
+          const current = filesRef.current.find((f) => f.id === activeId);
+          if (!current) return;
+          saveDocument(current)
+            .then(() => {
+              savedAtRef.current = Date.now();
+              setSavedAgo(0);
+              setSaveState("saved");
+            })
+            .catch((e) => console.error("Save failed", e));
+        }, 200);
+        toast.success(
+          result.company
+            ? `loaded ${result.title ?? "role"} · ${result.company}`
+            : `loaded ${result.title ?? "job"}`
+        );
+
+        // Summarise in the background. Persists once it lands, never blocks the
+        // fetch UI or analyze path.
+        setSummaryLoading(true);
+        summariseJob(result.text)
+          .then((summary) => {
+            setFiles((prev) =>
+              prev.map((f) => (f.id === activeId ? { ...f, jobSummary: summary } : f))
+            );
+            const latest = filesRef.current.find((f) => f.id === activeId);
+            if (latest) {
+              saveDocument({ ...latest, jobSummary: summary }).catch((e) =>
+                console.error("Save failed", e)
+              );
+            }
+          })
+          .catch((e) => {
+            console.error("Summary failed", e);
+          })
+          .finally(() => setSummaryLoading(false));
+      } catch (e) {
+        const message = e instanceof Error ? e.message : "fetch failed";
+        setUrlFetchError(message);
+        toast.error(`couldn't load: ${message}`);
+      } finally {
+        setUrlFetchLoading(false);
+      }
+    },
+    [activeId]
+  );
+
+  const handleAnalyzeJob = useCallback(async () => {
+    if (!activeFile) return;
+    const jd = activeFile.jobDescription?.trim();
+    if (!jd) {
+      toast.error("paste the job description before running analysis");
+      return;
+    }
+    const key = {
+      docId: activeFile.id,
+      jobKey: activeFile.jobKey ?? null,
+      markdownHash: markdownHash(markdown),
+    };
+    setFitError(null);
+    setFitLoading(true);
+    try {
+      const { analysis } = await analyzeFit({
+        markdown,
+        jobDescription: jd,
+        jobKey: key.jobKey,
+      });
+      setFitAnalysis(analysis);
+      setFitAnalysisKey(key);
+      setSuggestionStatus({});
+    } catch (e) {
+      const message = e instanceof Error ? e.message : "analysis failed";
+      setFitError(message);
+      toast.error(message);
+    } finally {
+      setFitLoading(false);
+    }
+  }, [activeFile, markdown]);
+
+  const handleTailorJob = useCallback(async () => {
+    if (!jobDescription?.trim()) {
+      toast.error("paste the job description before tailoring");
+      return;
+    }
+    const variant = await ensureVariantForJob();
+    if (!variant) return;
+    queueAiWorkflow(
+      "tailor",
+      "Tailor this resume to the target job. Focus on the summary, the strongest work bullets, and the most relevant skills."
+    );
+  }, [queueAiWorkflow, jobDescription, ensureVariantForJob]);
+
+  const handleAcceptSuggestion = useCallback(
+    async (index: number) => {
+      if (!fitAnalysis) return;
+      const suggestion = fitAnalysis.suggestions[index];
+      if (!suggestion) return;
+      const variant = await ensureVariantForJob();
+      if (!variant) return;
+      // ensureVariantForJob may have switched the active doc; read latest markdown
+      // from the store so the splice targets the right document.
+      const currentMd = useResumeStore.getState().markdown;
+      const next = applySuggestion(currentMd, suggestion.before, suggestion.after);
+      if (!next) {
+        setSuggestionStatus((prev) => ({ ...prev, [index]: "error" }));
+        toast.error("couldn't find the exact text — open AI tab to rewrite");
+        return;
+      }
+      store.setMarkdown(next);
+      setSuggestionStatus((prev) => ({ ...prev, [index]: "accepted" }));
+      // Re-anchor the analysis key to the post-accept state so applying our own
+      // suggestion doesn't mark the analysis stale and pull the user into a
+      // re-analyze loop.
+      setFitAnalysisKey({
+        docId: variant.id,
+        jobKey: variant.jobKey ?? null,
+        markdownHash: markdownHash(next),
+      });
+    },
+    [fitAnalysis, ensureVariantForJob, store]
+  );
+
+  const handleRejectSuggestion = useCallback((index: number) => {
+    setSuggestionStatus((prev) => ({ ...prev, [index]: "rejected" }));
   }, []);
 
+  const handleClearAnalysis = useCallback(() => {
+    setFitAnalysis(null);
+    setFitAnalysisKey(null);
+    setSuggestionStatus({});
+    setFitError(null);
+  }, []);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const mod = e.metaKey || e.ctrlKey;
+      const target = e.target as HTMLElement | null;
+      const isEditing =
+        !!target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.isContentEditable);
+      if (e.key === "?" && !isEditing) {
+        e.preventDefault();
+        setShortcutOpen((o) => !o);
+        return;
+      }
+      if (!mod) return;
+      if (e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setPaletteOpen((o) => !o);
+      } else if (e.key.toLowerCase() === "z" && !e.shiftKey && !isEditing) {
+        e.preventDefault();
+        if (store.canUndo()) store.undo();
+      } else if (
+        (e.key.toLowerCase() === "z" && e.shiftKey) ||
+        e.key.toLowerCase() === "y"
+      ) {
+        if (isEditing) return;
+        e.preventDefault();
+        if (store.canRedo()) store.redo();
+      } else if (e.key.toLowerCase() === "b") {
+        e.preventDefault();
+        setLeftOpen((o) => !o);
+      } else if (e.key.toLowerCase() === "j") {
+        e.preventDefault();
+        setRightOpen((o) => !o);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [store]);
+
   return (
-    <div className="flex flex-col h-screen w-screen overflow-hidden bg-[#f6f6f6]">
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept=".pdf"
-        className="hidden"
-        onChange={(e) => {
-          const file = e.target.files?.[0];
-          if (file) handleFileUpload(file);
-          e.target.value = "";
-        }}
-      />
+    <div className="h-screen w-screen flex flex-col bg-background">
+      <header className="flex items-center gap-2 pl-2 pr-2 h-11 border-b border-border bg-background sticky top-0 z-30">
+        <IconButton
+          aria-label={leftOpen ? "hide documents" : "show documents"}
+          onClick={() => setLeftOpen((o) => !o)}
+          size="sm"
+        >
+          <Sidebar weight="light" />
+        </IconButton>
 
-      {/* ─── Toolbar ─── */}
-      <div data-print-hide className="h-10 shrink-0 bg-white border-b border-black/[0.08] flex items-center justify-between px-4">
-        <div className="flex items-center gap-3">
-          <h1 className="text-sm tracking-tight font-[family-name:var(--font-instrument-serif)] italic text-black">resumewise</h1>
-          {activeFile && (
-            <>
-              <Separator orientation="vertical" className="h-4" />
-              <span className="text-[11px] text-black/50 truncate max-w-[200px]">{activeFile.name.replace(/\.pdf$/i, "")}</span>
-            </>
-          )}
-        </div>
-        <div className="flex items-center gap-1.5">
-          <Button variant="ghost" size="xs" className="gap-1 text-[11px]" onClick={() => fileInputRef.current?.click()}>
-            <Upload className="size-3" />
-            Import
-          </Button>
-          <Button variant="ghost" size="xs" className="gap-1 text-[11px]" onClick={saveNow} disabled={!activeFile}>
-            <Save className="size-3" />
-            Save
-          </Button>
-          <Button variant="ghost" size="xs" className="gap-1 text-[11px]" onClick={handleExport} disabled={!activeFile}>
-            <Download className="size-3" />
-            Export
-          </Button>
-        </div>
-      </div>
-
-      <div className="flex flex-1 min-h-0 overflow-hidden">
-        {/* Left Sidebar */}
-        <div data-print-hide className={`shrink-0 h-full overflow-hidden transition-[width] duration-200 ease-out ${leftOpen ? "w-[280px]" : "w-0"}`}>
-          <div className="w-[280px] h-full bg-white border-r border-black/[0.08] flex flex-col">
-            <div className="flex items-center justify-between px-4 pt-4 pb-3">
-              <h2 className="text-lg tracking-tight font-[family-name:var(--font-instrument-serif)] italic text-black">documents</h2>
-              <button onClick={() => setLeftOpen(false)} className="p-1 hover:bg-black/5 rounded"><PanelIcon side="right" /></button>
-            </div>
-            <DocSidebar
-              files={files}
-              activeId={activeId}
-              loading={loading}
-              onSelect={switchDocument}
-              onUpload={() => fileInputRef.current?.click()}
-              onCreateBlank={handleCreateBlank}
-              onDuplicate={handleDuplicate}
-              onRename={handleRename}
-              onDelete={handleDelete}
-              onToggleCollapse={handleToggleCollapse}
-            />
-          </div>
+        <div className="flex items-center gap-2 min-w-0">
+          <BrandMark />
+          <span className="text-label text-muted-foreground select-none">resumewise</span>
+          <span className="h-3 w-px bg-border mx-1" aria-hidden />
+          <span className="text-sm font-medium text-foreground truncate max-w-[30ch]">
+            {activeFile?.name.replace(/\.pdf$/i, "") || "—"}
+          </span>
+          {activeFile?.parentId ? (
+            <Badge variant="outline" size="sm" className="uppercase tracking-wider">
+              variant
+            </Badge>
+          ) : null}
         </div>
 
-        {/* Center */}
-        <div data-print-pages className="flex-1 min-w-0 h-full relative">
-          {!leftOpen && (
-            <button data-print-hide onClick={() => setLeftOpen(true)} className="absolute top-4 left-4 z-10 p-1 hover:bg-black/5 rounded bg-white shadow-sm">
-              <PanelIcon side="right" />
-            </button>
-          )}
-          {activeFile ? (
-            <>
-              <ResumeEditor content={activeContent} margins={margins} onActiveEditorChange={setEditor} onAllEditorsChange={setAllEditors} onSetFullContent={(fn) => { setFullContentRef.current = fn; }} />
-              <SelectionBar allEditors={allEditors} collectEditorJson={collectEditorJson} setFullContent={setFullContentRef} />
-            </>
+        {activeFile && <SaveIndicator state={saveState} secondsAgo={savedAgo} />}
+
+        <div className="flex-1" />
+
+        <button
+          onClick={() => setPaletteOpen(true)}
+          className="h-7 inline-flex items-center gap-1.5 px-2 rounded-[var(--radius-md)] text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition-[background-color,color] duration-150"
+        >
+          <MagnifyingGlass weight="light" className="size-3.5" />
+          <span>find</span>
+          <Kbd>⌘K</Kbd>
+        </button>
+
+        <IconButton
+          aria-label="toggle theme"
+          onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
+          size="sm"
+        >
+          {theme === "dark" ? <Sun weight="light" /> : <MoonStars weight="light" />}
+        </IconButton>
+
+        <IconButton
+          aria-label="keyboard shortcuts"
+          onClick={() => setShortcutOpen(true)}
+          size="sm"
+        >
+          <Keyboard weight="light" />
+        </IconButton>
+
+        <Button
+          size="sm"
+          onClick={handleDownload}
+          disabled={!activeFile || isDownloading}
+        >
+          {isDownloading ? (
+            <CircularLoader size="sm" className="size-3.5" />
           ) : (
-            <div className="flex items-center justify-center h-full">
-              <div className="text-center space-y-4">
-                <h2 className="text-3xl font-[family-name:var(--font-instrument-serif)] italic text-black">resumewise</h2>
-                <p className="text-sm text-black/40">Upload a PDF or create a new document</p>
-                <div className="flex gap-2 justify-center">
-                  <button onClick={handleCreateBlank} className="px-4 py-2 text-sm border border-black/10 text-black rounded-lg hover:bg-black/[0.02] transition-colors">
-                    New blank
-                  </button>
-                  <button onClick={() => fileInputRef.current?.click()} className="px-4 py-2 text-sm bg-black text-white rounded-lg hover:bg-black/80 transition-colors">
-                    {loading ? "Parsing..." : "Upload PDF"}
-                  </button>
-                </div>
-              </div>
-            </div>
+            <DownloadSimple weight="light" className="size-3.5" />
           )}
-          {!rightOpen && (
-            <button data-print-hide onClick={() => setRightOpen(true)} className="absolute top-4 right-4 z-10 p-1 hover:bg-black/5 rounded bg-white shadow-sm">
-              <PanelIcon side="left" />
-            </button>
-          )}
-        </div>
+          download
+        </Button>
 
-        {/* Right Sidebar */}
-        <div data-print-hide className={`shrink-0 h-full overflow-hidden transition-[width] duration-200 ease-out ${rightOpen ? "w-[280px]" : "w-0"}`}>
-          <div className="w-[280px] h-full bg-white border-l border-black/[0.08] flex flex-col">
-            <div className="flex items-center justify-between px-4 pt-4 pb-3">
-              <button onClick={() => setRightOpen(false)} className="p-1 hover:bg-black/5 rounded"><PanelIcon side="left" /></button>
-              <div className="flex items-center gap-1.5">
-                <button
-                  onClick={() => setRightTab("editor")}
-                  className={`text-lg tracking-tight font-[family-name:var(--font-instrument-serif)] italic transition-colors ${rightTab === "editor" ? "text-black" : "text-black/25 hover:text-black/40"}`}
-                >
-                  editor
-                </button>
-                <button
-                  onClick={() => setRightTab("ai")}
-                  className={`text-lg tracking-tight font-[family-name:var(--font-instrument-serif)] italic transition-colors ${rightTab === "ai" ? "text-black" : "text-black/25 hover:text-black/40"}`}
-                >
-                  ai
-                </button>
-              </div>
+        <IconButton
+          aria-label={rightOpen ? "hide panel" : "show panel"}
+          onClick={() => setRightOpen((o) => !o)}
+          size="sm"
+        >
+          <SidebarSimple weight="light" />
+        </IconButton>
+      </header>
+
+      <div className="flex-1 flex min-h-0">
+        {leftOpen && (
+          <aside className="w-60 bg-background text-foreground border-r border-border flex flex-col min-h-0">
+            <div className="flex items-center justify-between px-3 pt-3 pb-2">
+              <span className="text-label text-muted-foreground">documents</span>
+              <span
+                className="text-label text-muted-foreground tabular"
+                data-tabular
+              >
+                {String(files.length).padStart(2, "0")}
+              </span>
             </div>
-            <div className="flex-1 overflow-y-auto min-h-0 flex flex-col">
-              {rightTab === "editor" ? (
-                <>
-                  <TextPanel editor={editor} allEditors={allEditors} />
+            <div className="flex-1 overflow-y-auto">
+              <DocSidebar
+                files={files}
+                activeId={activeId}
+                loading={loadingDocs}
+                onSelect={handleSelect}
+                onUpload={handleUpload}
+                onCreateBlank={handleCreateBlank}
+                onDuplicate={handleDuplicate}
+                onRename={handleRename}
+                onDelete={handleDelete}
+                onToggleCollapse={handleToggleCollapse}
+              />
+            </div>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="application/pdf"
+              className="hidden"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) handleFileChosen(f);
+                if (e.target) e.target.value = "";
+              }}
+            />
+          </aside>
+        )}
 
-                  <Separator />
-                  <div className="px-3 py-2.5">
-                    <div className="text-[10px] font-medium uppercase tracking-widest text-muted-foreground mb-2">Page Margins</div>
-                    <div className="grid grid-cols-2 gap-x-1.5 gap-y-1.5">
-                      {(["top", "bottom", "left", "right"] as const).map((side) => (
-                        <div key={side}>
-                          <span className="text-[10px] font-medium uppercase tracking-widest text-muted-foreground">{side}</span>
-                          <div className="relative">
-                            <Input
-                              type="number"
-                              min={0}
-                              max={120}
-                              value={margins[side]}
-                              onChange={(e) => handleMarginChange(side, parseInt(e.target.value) || 0)}
-                              className="h-7 text-[11px] md:text-[11px] pr-6 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
-                            />
-                            <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[9px] text-muted-foreground pointer-events-none">px</span>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                    <div className="mt-2">
-                      <span className="text-[10px] font-medium uppercase tracking-widest text-muted-foreground">Presets</span>
-                      <div className="flex gap-1.5 mt-1">
-                        {[
-                          { label: "Narrow", t: 36, r: 36, b: 36, l: 36 },
-                          { label: "Normal", t: 48, r: 56, b: 48, l: 56 },
-                          { label: "Wide", t: 72, r: 72, b: 72, l: 72 },
-                        ].map((p) => (
-                          <Button
-                            key={p.label}
-                            variant={margins.top === p.t && margins.right === p.r ? "default" : "outline"}
-                            size="xs"
-                            className="text-[10px]"
-                            onClick={() => setMargins({ top: p.t, right: p.r, bottom: p.b, left: p.l })}
-                          >
-                            {p.label}
-                          </Button>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-                </>
-              ) : (
+        <main className="flex-1 min-w-0 flex flex-col bg-background">
+          {activeFile ? (
+            <div className="flex-1 min-h-0">
+              <CenterTabs
+                tab={centerTab}
+                onTabChange={setCenterTab}
+                markdown={markdown}
+                onMarkdownChange={store.setMarkdown}
+                theme={resumeTheme}
+                template={template}
+                onEnsureAiFork={ensureAiFork}
+                onOpenAiTab={openAiTab}
+              />
+            </div>
+          ) : (
+            <EmptyState
+              loading={loadingDocs}
+              onCreate={handleCreateBlank}
+              onUpload={handleUpload}
+            />
+          )}
+        </main>
+
+        {rightOpen && activeFile && (
+          <aside className="w-[360px] bg-background border-l border-border flex flex-col min-h-0">
+            <Tabs
+              value={rightTab}
+              onValueChange={(v) => setInspectorTab(v as RightTab)}
+              className="flex-1 min-h-0 flex flex-col"
+            >
+              <div className="flex items-center px-3 h-11 border-b border-border">
+                <TabsList variant="pill" className="w-full">
+                  <TabsTab value="design" variant="pill">
+                    design
+                  </TabsTab>
+                  <TabsTab value="ai" variant="pill">
+                    ai
+                  </TabsTab>
+                  <TabsTab value="job" variant="pill">
+                    job
+                  </TabsTab>
+                </TabsList>
+              </div>
+              <TabsPanel
+                value="design"
+                className="flex-1 min-h-0 flex flex-col data-[hidden]:hidden animate-panel-in"
+              >
+                <DocEditorPanel mode={centerTab} />
+              </TabsPanel>
+              <TabsPanel
+                value="ai"
+                className="flex-1 min-h-0 flex flex-col data-[hidden]:hidden animate-panel-in"
+              >
                 <AiPanel
-                  allEditors={allEditors}
-                  collectEditorJson={collectEditorJson}
-                  documentId={activeFile?.id}
-                  setFullContent={setFullContentRef}
+                  markdown={markdown}
+                  activeFile={activeFile}
+                  jobDescription={jobDescription}
+                  onEnsureVariant={ensureVariantForJob}
+                  onEnsureAiFork={ensureAiFork}
                 />
-              )}
-            </div>
-          </div>
-        </div>
+              </TabsPanel>
+              <TabsPanel
+                value="job"
+                className="flex-1 min-h-0 flex flex-col data-[hidden]:hidden animate-panel-in"
+              >
+                <JobPanel
+                  activeFile={activeFile}
+                  jobDescription={jobDescription ?? ""}
+                  analysis={fitAnalysis}
+                  analysisLoading={fitLoading}
+                  analysisError={fitError}
+                  analysisStale={
+                    !!fitAnalysis &&
+                    (!fitAnalysisKey ||
+                      fitAnalysisKey.docId !== activeFile.id ||
+                      fitAnalysisKey.jobKey !== (activeFile.jobKey ?? null) ||
+                      fitAnalysisKey.markdownHash !== markdownHash(markdown))
+                  }
+                  urlFetchLoading={urlFetchLoading}
+                  urlFetchError={urlFetchError}
+                  summaryLoading={summaryLoading}
+                  suggestionStatus={suggestionStatus}
+                  onJobChange={handleJobChange}
+                  onFetchUrl={handleFetchJobUrl}
+                  onAnalyze={handleAnalyzeJob}
+                  onTailor={handleTailorJob}
+                  onAcceptSuggestion={handleAcceptSuggestion}
+                  onRejectSuggestion={handleRejectSuggestion}
+                  onClearAnalysis={handleClearAnalysis}
+                />
+              </TabsPanel>
+            </Tabs>
+          </aside>
+        )}
       </div>
+      {activeFile && (
+        <TemplatePicker
+          open={pickerOpen}
+          onOpenChange={setPickerOpen}
+          value={template}
+          onSelect={(id) => store.setTemplate(id)}
+        />
+      )}
+      <CommandPalette
+        open={paletteOpen}
+        onOpenChange={setPaletteOpen}
+        files={files}
+        activeId={activeId}
+        onSelectDoc={handleSelect}
+        onPrefillAi={(prompt) => {
+          setInspectorTab("ai");
+          store.setAiWorkflowMode("idle");
+          store.setAiPrefill(prompt);
+        }}
+        onToggleTheme={() =>
+          setTheme((t) => (t === "dark" ? "light" : "dark"))
+        }
+        onNewBlank={handleCreateBlank}
+        onUpload={handleUpload}
+        onDownload={handleDownload}
+        theme={theme}
+      />
+      <ShortcutSheet open={shortcutOpen} onOpenChange={setShortcutOpen} />
     </div>
   );
 }
 
-function PanelIcon({ side }: { side: "left" | "right" }) {
-  const x = side === "right" ? 11.5 : 6.5;
+function BrandMark() {
   return (
-    <svg width="16" height="16" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-      <rect x="2" y="2" width="14" height="14" rx="2" />
-      <line x1={x} y1="2" x2={x} y2="16" />
-    </svg>
+    <span
+      aria-hidden
+      className="size-5 rounded-sm bg-foreground text-background inline-flex items-center justify-center font-mono text-[11px] font-bold tracking-[0.04em] select-none"
+    >
+      R
+    </span>
+  );
+}
+
+function SaveIndicator({
+  state,
+  secondsAgo,
+}: {
+  state: SaveState;
+  secondsAgo: number | null;
+}) {
+  const label =
+    state === "saving"
+      ? "saving…"
+      : state === "saved"
+        ? secondsAgo === null || secondsAgo < 1
+          ? "saved just now"
+          : `saved ${secondsAgo}s ago`
+        : "draft";
+
+  return (
+    <div className="flex items-center gap-1.5 pl-1">
+      <span className="relative inline-flex size-1.5 shrink-0" aria-hidden>
+        <span
+          className={cn(
+            "absolute inset-0 rounded-full",
+            state === "saving"
+              ? "bg-brand"
+              : state === "saved"
+                ? "bg-emerald-500 dark:bg-emerald-400"
+                : "bg-muted-foreground/50"
+          )}
+        />
+        {state === "saved" && (
+          <span
+            className={cn(
+              "absolute inset-0 rounded-full bg-emerald-400 animate-save-pulse"
+            )}
+          />
+        )}
+      </span>
+      <span
+        className="font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground tabular"
+        data-tabular
+      >
+        {label}
+      </span>
+    </div>
+  );
+}
+
+function EmptyState({
+  loading,
+  onCreate,
+  onUpload,
+}: {
+  loading: boolean;
+  onCreate: () => void;
+  onUpload: () => void;
+}) {
+  return (
+    <div className="flex-1 flex items-center justify-center p-6 bg-background">
+      <div className="max-w-[480px] w-full flex flex-col gap-6">
+        <div className="flex items-baseline gap-3 select-none">
+          <span
+            className="text-display-lg text-foreground tabular"
+            data-tabular
+          >
+            00
+          </span>
+          <span className="text-label text-muted-foreground">
+            / no resume open
+          </span>
+        </div>
+        <h1 className="text-heading text-foreground font-semibold max-w-[32ch]">
+          start blank, import a pdf, or let ai draft one from a role title.
+        </h1>
+        <p className="text-sm text-muted-foreground max-w-[52ch] text-pretty leading-relaxed">
+          local-first. your data lives in this browser. bring your own api key
+          for ai assistance — anthropic, openai, gemini, grok, or openrouter.
+        </p>
+        <div className="flex flex-wrap gap-2 pt-2">
+          <Button size="sm" onClick={onCreate} disabled={loading}>
+            <Plus weight="light" className="size-3.5" />
+            start blank
+          </Button>
+          <Button size="sm" variant="outline" onClick={onUpload} disabled={loading}>
+            <UploadSimple weight="light" className="size-3.5" />
+            import pdf
+          </Button>
+          <Button size="sm" variant="ghost" disabled className="opacity-50">
+            <Sparkle weight="light" className="size-3.5" />
+            draft with ai
+            <Badge variant="outline" size="sm" className="ml-1 uppercase tracking-wider">
+              soon
+            </Badge>
+          </Button>
+        </div>
+        <div className="pt-4 border-t border-border flex items-center gap-2 text-[11px] text-muted-foreground">
+          <FileText weight="light" className="size-3.5" />
+          <span>press <Kbd>?</Kbd> for keyboard shortcuts</span>
+        </div>
+      </div>
+    </div>
   );
 }

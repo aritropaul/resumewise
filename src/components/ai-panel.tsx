@@ -1,389 +1,494 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback } from "react";
-import type { Editor } from "@tiptap/react";
-import { ArrowUp, Square, KeyRound, X } from "lucide-react";
+import * as React from "react";
+import { PaperPlaneTilt, Sparkle, Stop, X } from "@phosphor-icons/react";
+import { toast } from "sonner";
+import { Textarea } from "@/components/ui/textarea";
+import { IconButton } from "@/components/ui/icon-button";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Tool, type ToolPart } from "@/components/ui/tool";
-import { Loader } from "@/components/ui/loader";
+import { BezelCard } from "@/components/ui/card";
+import { AiDiffView } from "@/components/ai-diff-view";
+import { useResumeStore } from "@/lib/resume-store";
+import { getApiKey } from "@/lib/ai";
+import type { SavedDocument } from "@/lib/storage";
 import {
-  getApiKey,
-  setApiKey as storeApiKey,
-  clearApiKey,
-  detectProvider,
-  providerLabel,
-  editorJsonToText,
-  type ChatMessage,
-  type ToolCallInfo,
-} from "@/lib/ai";
-import { executeToolCall } from "@/lib/editor-tools";
+  applyDecisions,
+  computeHunks,
+  type DiffHunk,
+  type HunkStatus,
+} from "@/lib/resume-diff";
+import { rewriteSelection, applyScopedReplacement } from "@/lib/scoped-rewrite";
 
-interface DisplayMessage {
-  role: "user" | "assistant" | "tool-results";
+interface AiPanelProps {
+  markdown: string;
+  activeFile: SavedDocument;
+  jobDescription: string | null;
+  onEnsureVariant: () => Promise<SavedDocument | null>;
+  onEnsureAiFork: () => Promise<SavedDocument | null>;
+}
+
+type Mode = "idle" | "chat" | "analyze" | "tailor";
+
+interface ChatTurn {
+  role: "user" | "assistant";
   content: string;
-  toolCalls?: ToolCallInfo[];
 }
 
-interface Props {
-  allEditors: Editor[];
-  collectEditorJson: (editors: Editor[]) => Record<string, unknown> | null;
-  documentId: string | undefined;
-  setFullContent: React.RefObject<((json: Record<string, unknown>) => void) | null>;
+// Extract the markdown body inside ```markdown ... ``` fences. Tolerates
+// partial fences while streaming.
+function extractFencedMarkdown(raw: string): string | null {
+  const match = raw.match(/```(?:markdown|md)?\n([\s\S]*?)(?:\n```|$)/i);
+  if (!match) return null;
+  return match[1];
 }
 
-export function AiPanel({ allEditors, collectEditorJson, documentId, setFullContent }: Props) {
-  const [apiKey, setApiKey] = useState<string | null>(null);
-  const [keyInput, setKeyInput] = useState("");
-  const [messages, setMessages] = useState<DisplayMessage[]>([]);
-  const [input, setInput] = useState("");
-  const [isStreaming, setIsStreaming] = useState(false);
-  const [streamingContent, setStreamingContent] = useState("");
-  const [streamingToolCalls, setStreamingToolCalls] = useState<ToolCallInfo[]>([]);
-  const abortRef = useRef<AbortController | null>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const prevDocId = useRef(documentId);
+export function AiPanel({
+  markdown,
+  activeFile,
+  jobDescription,
+  onEnsureVariant,
+  onEnsureAiFork,
+}: AiPanelProps) {
+  const aiPrefill = useResumeStore((s) => s.aiPrefill);
+  const setAiPrefill = useResumeStore((s) => s.setAiPrefill);
+  const aiWorkflowMode = useResumeStore((s) => s.aiWorkflowMode);
+  const setAiWorkflowMode = useResumeStore((s) => s.setAiWorkflowMode);
+  const replaceMarkdown = useResumeStore((s) => s.replaceMarkdown);
+  const setMarkdown = useResumeStore((s) => s.setMarkdown);
+  const aiSelectionChip = useResumeStore((s) => s.aiSelectionChip);
+  const setAiSelectionChip = useResumeStore((s) => s.setAiSelectionChip);
 
-  useEffect(() => { setApiKey(getApiKey()); }, []);
+  const [input, setInput] = React.useState("");
+  const [turns, setTurns] = React.useState<ChatTurn[]>([]);
+  const [streamingText, setStreamingText] = React.useState<string>("");
+  const [streaming, setStreaming] = React.useState(false);
+  const [hunks, setHunks] = React.useState<DiffHunk[] | null>(null);
+  const [decisions, setDecisions] = React.useState<Map<string, HunkStatus>>(
+    new Map()
+  );
+  const [candidateMarkdown, setCandidateMarkdown] = React.useState<string | null>(null);
+  const abortRef = React.useRef<AbortController | null>(null);
 
-  useEffect(() => {
-    if (prevDocId.current !== documentId) {
-      setMessages([]);
-      setStreamingContent("");
-      setStreamingToolCalls([]);
-      setIsStreaming(false);
-      if (abortRef.current) abortRef.current.abort();
-      prevDocId.current = documentId;
+  // Soak up any prefill the command palette or job panel queued.
+  React.useEffect(() => {
+    if (aiPrefill) {
+      setInput(aiPrefill);
+      setAiPrefill(null);
     }
-  }, [documentId]);
+  }, [aiPrefill, setAiPrefill]);
 
-  // Auto-scroll messages — only scroll within the messages container, not the whole page
-  const messagesContainerRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const container = messagesContainerRef.current;
-    if (container) {
-      container.scrollTop = container.scrollHeight;
+  // Reset state when active doc changes — but skip the reset when the change
+  // was caused by an in-flight fork we initiated ourselves (fork-on-first-edit
+  // swaps activeFile.id mid-stream and we'd otherwise lose the turn state).
+  const lastResetIdRef = React.useRef<string>(activeFile.id);
+  const expectedForkIdRef = React.useRef<string | null>(null);
+  React.useEffect(() => {
+    if (lastResetIdRef.current === activeFile.id) return;
+    if (expectedForkIdRef.current === activeFile.id) {
+      lastResetIdRef.current = activeFile.id;
+      expectedForkIdRef.current = null;
+      return;
     }
-  }, [messages, streamingContent, streamingToolCalls]);
+    lastResetIdRef.current = activeFile.id;
+    setTurns([]);
+    setStreamingText("");
+    setHunks(null);
+    setDecisions(new Map());
+    setCandidateMarkdown(null);
+  }, [activeFile.id]);
 
-  const handleSaveKey = useCallback(() => {
-    if (keyInput.trim()) {
-      storeApiKey(keyInput.trim());
-      setApiKey(keyInput.trim());
-      setKeyInput("");
+  const runRequest = async (mode: Mode, prompt: string) => {
+    if (streaming) return;
+    const apiKey = getApiKey() || undefined;
+
+    // Tailor mode creates/opens a job-matched variant (JD required).
+    // Chat mode forks a plain variant on the first AI edit to protect the base.
+    // Analyze is read-only critique — no fork.
+    if (mode === "tailor") {
+      const ok = await onEnsureVariant();
+      if (!ok) return;
+      expectedForkIdRef.current = ok.id;
+    } else if (mode === "chat") {
+      const ok = await onEnsureAiFork();
+      if (!ok) return;
+      expectedForkIdRef.current = ok.id;
     }
-  }, [keyInput]);
 
-  const handleClearKey = useCallback(() => {
-    clearApiKey();
-    setApiKey(null);
-    setMessages([]);
-  }, []);
+    const userTurn: ChatTurn = { role: "user", content: prompt };
+    const nextTurns = [...turns, userTurn];
+    setTurns(nextTurns);
+    setInput("");
+    setStreamingText("");
+    setHunks(null);
+    setDecisions(new Map());
+    setCandidateMarkdown(null);
+    setStreaming(true);
 
-  /** Stream a request and handle text + tool_call events. Returns the accumulated state. */
-  const streamRequest = useCallback(
-    async (
-      body: Record<string, unknown>,
-      signal: AbortSignal
-    ): Promise<{
-      text: string;
-      toolCalls: ToolCallInfo[];
-      needsToolResults: boolean;
-    }> => {
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+
+    try {
       const res = await fetch("/api/chat", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-        signal,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          apiKey,
+          messages: nextTurns,
+          markdown,
+          jobDescription,
+          mode,
+        }),
+        signal: ctrl.signal,
       });
 
-      if (!res.ok) {
-        let errMsg = "Request failed";
-        try { const err = await res.json(); errMsg = err.error || errMsg; } catch { errMsg = `HTTP ${res.status}`; }
-        throw new Error(errMsg);
+      if (!res.ok || !res.body) {
+        const err = await res.json().catch(() => ({ error: "request failed" }));
+        throw new Error(err.error || `request failed (${res.status})`);
       }
 
-      const reader = res.body!.getReader();
+      const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
       let accumulated = "";
-      const toolCalls: ToolCallInfo[] = [];
-      let needsToolResults = false;
 
       while (true) {
-        const { done, value } = await reader.read();
+        const { value, done } = await reader.read();
         if (done) break;
-
         buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n\n");
-        buffer = lines.pop() || "";
-
-        for (const line of lines) {
-          if (!line.startsWith("data: ")) continue;
-          const data = line.slice(6);
-          if (data === "[DONE]") continue;
+        const frames = buffer.split("\n\n");
+        buffer = frames.pop() ?? "";
+        for (const frame of frames) {
+          const eventLine = frame.split("\n").find((l) => l.startsWith("event:"));
+          const dataLine = frame.split("\n").find((l) => l.startsWith("data:"));
+          if (!eventLine || !dataLine) continue;
+          const eventName = eventLine.slice("event:".length).trim();
+          let payload: { text?: string; message?: string } = {};
           try {
-            const parsed = JSON.parse(data);
-            if (parsed.text) {
-              accumulated += parsed.text;
-              setStreamingContent(accumulated);
-            }
-            if (parsed.tool_call) {
-              toolCalls.push(parsed.tool_call);
-              setStreamingToolCalls([...toolCalls]);
-            }
-            if (parsed.stop_reason === "tool_use") {
-              needsToolResults = true;
-            }
-            if (parsed.error) {
-              accumulated += `\nError: ${parsed.error}`;
-              setStreamingContent(accumulated);
-            }
-          } catch { /* ignore */ }
+            payload = JSON.parse(dataLine.slice("data:".length).trim());
+          } catch {
+            // ignore
+          }
+          if (eventName === "chunk" && payload.text) {
+            accumulated += payload.text;
+            setStreamingText(accumulated);
+          } else if (eventName === "error") {
+            throw new Error(payload.message || "stream error");
+          } else if (eventName === "done") {
+            // no-op; loop will exit naturally when reader is done.
+          }
         }
       }
 
-      return { text: accumulated, toolCalls, needsToolResults };
-    },
-    []
-  );
+      setTurns([...nextTurns, { role: "assistant", content: accumulated }]);
 
-  const sendMessage = useCallback(async () => {
-    if (!input.trim() || !apiKey || isStreaming) return;
-
-    const userMessage: DisplayMessage = { role: "user", content: input.trim() };
-    setMessages((prev) => [...prev, userMessage]);
-    setInput("");
-    setIsStreaming(true);
-    setStreamingContent("");
-    setStreamingToolCalls([]);
-    if (textareaRef.current) textareaRef.current.style.height = "auto";
-
-    const documentText = editorJsonToText(collectEditorJson(allEditors));
-    const controller = new AbortController();
-    abortRef.current = controller;
-
-    // Build the raw message history for the API (just role + content strings)
-    const apiMessages: ChatMessage[] = messages
-      .filter((m) => m.role === "user" || m.role === "assistant")
-      .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
-    apiMessages.push({ role: "user", content: input.trim() });
-
-    try {
-      let result = await streamRequest(
-        { apiKey, messages: apiMessages, documentText, mode: "chat", useTools: true },
-        controller.signal
-      );
-
-      // Tool calling loop — max 3 rounds to prevent infinite loops
-      let toolRound = 0;
-      const MAX_TOOL_ROUNDS = 3;
-      while (result.needsToolResults && result.toolCalls.length > 0 && toolRound < MAX_TOOL_ROUNDS) {
-        toolRound++;
-
-        // Execute tool calls against the editors (JSON-level, atomic)
-        const toolResults = result.toolCalls.map((tc) => ({
-          id: tc.id,
-          result: executeToolCall(allEditors, tc.name, tc.args, setFullContent.current),
-        }));
-
-        // Wait for reflow to settle after content change
-        await new Promise((r) => setTimeout(r, 300));
-
-        // Build tool calls with results attached
-        const executedToolCalls = result.toolCalls.map((tc, i) => ({
-          ...tc,
-          result: toolResults[i].result,
-        }));
-
-        // Add assistant message with completed tool calls + results summary
-        setMessages((prev) => [
-          ...prev,
-          // Assistant text + tool calls (with results already populated)
-          { role: "assistant" as const, content: result.text, toolCalls: executedToolCalls },
-          // Green results summary
-          { role: "tool-results" as const, content: toolResults.map((r) => r.result).join("\n"), toolCalls: executedToolCalls },
-        ]);
-
-        // Reset streaming state for follow-up
-        setStreamingContent("");
-        setStreamingToolCalls([]);
-
-        // Build follow-up — include the assistant's tool_use calls so the server can
-        // construct the proper message format for each provider
-        const followUpMessages = [
-          ...apiMessages,
-          // Special marker: assistant message with tool calls embedded
-          {
-            role: "assistant" as const,
-            content: result.text || "",
-            _toolCalls: result.toolCalls, // server uses this to build tool_use blocks
-          },
-        ];
-
-        result = await streamRequest(
-          {
-            apiKey,
-            messages: followUpMessages as any,
-            documentText: editorJsonToText(collectEditorJson(allEditors)),
-            mode: "chat",
-            useTools: toolRound < MAX_TOOL_ROUNDS, // disable tools on last round
-            toolResults,
-          },
-          controller.signal
-        );
+      if (mode === "analyze") {
+        // Pure critique — nothing to diff.
+        return;
       }
 
-      // Final text-only response
-      if (result.text) {
-        setMessages((prev) => [...prev, { role: "assistant", content: result.text, toolCalls: result.toolCalls.length > 0 ? result.toolCalls : undefined }]);
+      const extracted = extractFencedMarkdown(accumulated) ?? accumulated.trim();
+      if (!extracted || extracted === markdown) {
+        toast.message("no changes");
+        return;
       }
+      const next = computeHunks(markdown, extracted);
+      setCandidateMarkdown(extracted);
+      setHunks(next);
+      setDecisions(new Map());
     } catch (err) {
-      if ((err as Error).name !== "AbortError") {
-        setMessages((prev) => [...prev, { role: "assistant", content: `Error: ${(err as Error).message}` }]);
-      }
+      const message = err instanceof Error ? err.message : String(err);
+      if (message.toLowerCase().includes("abort")) return;
+      toast.error(message);
     } finally {
-      setStreamingContent("");
-      setStreamingToolCalls([]);
-      setIsStreaming(false);
+      setStreaming(false);
       abortRef.current = null;
     }
-  }, [input, apiKey, isStreaming, messages, collectEditorJson, allEditors, streamRequest]);
+  };
 
-  const handleStop = useCallback(() => { if (abortRef.current) abortRef.current.abort(); }, []);
+  const runScopedRequest = async (instruction: string) => {
+    if (streaming || !aiSelectionChip) return;
+    const apiKey = getApiKey() || undefined;
+    const chip = aiSelectionChip;
 
-  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
-    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); }
-  }, [sendMessage]);
+    const userTurn: ChatTurn = {
+      role: "user",
+      content: `rewrite selection: ${instruction}`,
+    };
+    const nextTurns = [...turns, userTurn];
+    setTurns(nextTurns);
+    setInput("");
+    setStreamingText("");
+    setHunks(null);
+    setDecisions(new Map());
+    setCandidateMarkdown(null);
+    setStreaming(true);
 
-  const handleTextareaInput = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    setInput(e.target.value);
-    const el = e.target;
-    el.style.height = "auto";
-    el.style.height = Math.min(el.scrollHeight, 72) + "px";
-  }, []);
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
 
-  // ── No API key ──
-  if (!apiKey) {
-    return (
-      <div className="px-4 py-6 flex flex-col items-center gap-3">
-        <KeyRound className="size-5 text-black/20" />
-        <p className="text-[11px] text-black/60 text-center">Enter your API key to use AI features</p>
-        <p className="text-[10px] text-black/30 text-center">OpenAI, Anthropic, Gemini, Grok, OpenRouter</p>
-        <Input type="password" placeholder="Paste API key..." value={keyInput} onChange={(e) => setKeyInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleSaveKey()} className="h-7 text-[11px] md:text-[11px] font-mono" />
-        <Button size="xs" className="w-full text-[10px]" onClick={handleSaveKey}>Save key</Button>
-        <p className="text-[10px] text-black/30 text-center">Stored locally, never sent to our servers</p>
-      </div>
-    );
-  }
+    try {
+      const forked = await onEnsureAiFork();
+      if (!forked) return;
+      expectedForkIdRef.current = forked.id;
 
-  // ── Chat ──
+      const replacement = await rewriteSelection({
+        selection: chip.text,
+        instruction,
+        apiKey,
+        signal: ctrl.signal,
+        onChunk: (acc) => setStreamingText(acc),
+      });
+
+      if (!replacement) {
+        toast.message("no change");
+        return;
+      }
+
+      const currentMd = useResumeStore.getState().markdown;
+      const next = applyScopedReplacement({
+        markdown: currentMd,
+        start: chip.start,
+        end: chip.end,
+        originalText: chip.text,
+        replacement,
+      });
+
+      if (next.markdown === currentMd) {
+        toast.error("couldn't find the original selection to replace");
+        return;
+      }
+
+      setMarkdown(next.markdown);
+      setAiSelectionChip(null);
+      setTurns([
+        ...nextTurns,
+        { role: "assistant", content: `rewrote selection (${replacement.length} chars)` },
+      ]);
+      toast.success("selection rewritten");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message.toLowerCase().includes("abort")) return;
+      toast.error(message);
+    } finally {
+      setStreaming(false);
+      abortRef.current = null;
+    }
+  };
+
+  const handleSubmit = () => {
+    const trimmed = input.trim();
+    if (!trimmed) return;
+    if (aiSelectionChip) {
+      void runScopedRequest(trimmed);
+      return;
+    }
+    void runRequest(aiWorkflowMode === "idle" ? "chat" : aiWorkflowMode, trimmed);
+    setAiWorkflowMode("idle");
+  };
+
+  const stopStream = () => {
+    abortRef.current?.abort();
+  };
+
+  const setAllDecisions = (status: HunkStatus) => {
+    if (!hunks) return;
+    const next = new Map<string, HunkStatus>();
+    for (const h of hunks) next.set(h.id, status);
+    setDecisions(next);
+  };
+
+  const applyHunks = () => {
+    if (!hunks || !candidateMarkdown) return;
+    const result = applyDecisions(markdown, candidateMarkdown, decisions);
+    setMarkdown(result);
+    replaceMarkdown(result);
+    setHunks(null);
+    setCandidateMarkdown(null);
+    setDecisions(new Map());
+    toast.success("applied AI changes");
+  };
+
+  const discardHunks = () => {
+    setHunks(null);
+    setCandidateMarkdown(null);
+    setDecisions(new Map());
+  };
+
   return (
-    <div className="flex flex-col h-full">
-      <div className="px-3 py-1.5 flex items-center justify-between border-b border-black/[0.06]">
-        <span className="text-[10px] text-black/40 truncate">{providerLabel(detectProvider(apiKey))}</span>
-        <button onClick={handleClearKey} className="text-[10px] text-black/30 hover:text-black/60 transition-colors"><X className="size-3" /></button>
-      </div>
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="flex-1 min-h-0 overflow-y-auto px-3 py-3">
+        {turns.length === 0 && !streaming && !hunks ? (
+          <EmptyCoach onPick={(s) => setInput(s)} />
+        ) : null}
 
-      <div ref={messagesContainerRef} className="flex-1 overflow-y-auto px-3 py-3 space-y-2.5">
-        {messages.length === 0 && !isStreaming && (
-          <div className="flex flex-col items-center justify-center h-full gap-2 text-center">
-            <p className="text-[11px] text-black/30">Ask anything about your resume</p>
-          </div>
-        )}
-
-        {messages.map((msg, i) => {
-          if (msg.role === "user") {
-            return (
-              <div key={i} className="flex justify-end">
-                <div className="max-w-[220px] px-2.5 py-1.5 rounded-lg text-[11px] leading-relaxed whitespace-pre-wrap break-words bg-black text-white">
-                  {msg.content}
-                </div>
-              </div>
-            );
-          }
-          if (msg.role === "tool-results") {
-            return (
-              <div key={i} className="text-[10px] text-green-700 bg-green-50 rounded-lg px-2.5 py-1.5 space-y-0.5">
-                {msg.content.split("\n").map((line, j) => (
-                  <div key={j}>✓ {line}</div>
-                ))}
-              </div>
-            );
-          }
-          // assistant
-          return (
-            <div key={i} className="space-y-1">
-              {msg.content && (
-                <div className="max-w-[240px] px-2.5 py-1.5 rounded-lg text-[11px] leading-relaxed whitespace-pre-wrap break-words bg-black/[0.04] text-black">
-                  {msg.content}
-                </div>
-              )}
-              {msg.toolCalls?.map((tc) => (
-                <Tool
-                  key={tc.id}
-                  className="max-w-[240px]"
-                  toolPart={{
-                    type: tc.name,
-                    state: tc.result ? "output-available" : "input-streaming",
-                    input: tc.args,
-                    output: tc.result ? { result: tc.result } : undefined,
-                  } as ToolPart}
-                />
-              ))}
-            </div>
-          );
-        })}
-
-        {/* Streaming text */}
-        {isStreaming && streamingContent && (
-          <div className="max-w-[240px] px-2.5 py-1.5 rounded-lg text-[11px] leading-relaxed whitespace-pre-wrap break-words bg-black/[0.04] text-black">
-            {streamingContent}
-            <span className="inline-block w-1 h-3 bg-black/40 ml-0.5 animate-blink align-middle" />
-          </div>
-        )}
-
-        {/* Streaming tool calls */}
-        {isStreaming && streamingToolCalls.map((tc) => (
-          <Tool
-            key={tc.id}
-            className="max-w-[240px]"
-            toolPart={{
-              type: tc.name,
-              state: "input-streaming",
-              input: tc.args,
-            } as ToolPart}
-          />
+        {turns.map((turn, i) => (
+          <TurnBubble key={i} turn={turn} />
         ))}
 
-        {/* Loading dots */}
-        {isStreaming && !streamingContent && streamingToolCalls.length === 0 && (
-          <div className="flex justify-start">
-            <Loader variant="dots" size="sm" />
-          </div>
-        )}
+        {streaming ? <StreamingIndicator charCount={streamingText.length} /> : null}
 
-        {/* scroll anchor */}
+        {hunks ? (
+          <div className="mt-2">
+            <AiDiffView
+              hunks={hunks}
+              decisions={decisions}
+              onDecide={(id, status) =>
+                setDecisions((prev) => {
+                  const next = new Map(prev);
+                  next.set(id, status);
+                  return next;
+                })
+              }
+              onAcceptAll={() => setAllDecisions("accepted")}
+              onRejectAll={() => setAllDecisions("rejected")}
+              onApply={applyHunks}
+              onDiscard={discardHunks}
+            />
+          </div>
+        ) : null}
       </div>
 
-      <div className="px-3 py-2 border-t border-black/[0.06]">
-        <div className="flex items-end gap-1.5">
-          <textarea
-            ref={textareaRef}
-            value={input}
-            onChange={handleTextareaInput}
-            onKeyDown={handleKeyDown}
-            placeholder="Ask about your resume..."
-            disabled={isStreaming}
-            rows={1}
-            className="flex-1 resize-none rounded-md border border-input bg-background px-2.5 py-1.5 text-[11px] leading-relaxed placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
+      <div className="border-t border-border bg-background px-3 py-2">
+        {aiSelectionChip ? (
+          <SelectionChip
+            text={aiSelectionChip.text}
+            onClear={() => setAiSelectionChip(null)}
           />
-          {isStreaming ? (
-            <Button size="icon-xs" variant="outline" onClick={handleStop}><Square className="size-3" /></Button>
+        ) : null}
+        <div className="flex items-end gap-2">
+          <Textarea
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                e.preventDefault();
+                handleSubmit();
+              }
+            }}
+            placeholder={
+              aiSelectionChip
+                ? "describe how to rewrite the selection…"
+                : "ask for a rewrite — tighten bullets, tailor to a jd, sharpen the summary."
+            }
+            className="min-h-[72px]"
+            autoGrow
+            maxHeight={200}
+          />
+          {streaming ? (
+            <IconButton aria-label="stop" onClick={stopStream}>
+              <Stop weight="fill" />
+            </IconButton>
           ) : (
-            <Button size="icon-xs" onClick={sendMessage} disabled={!input.trim()}><ArrowUp className="size-3" /></Button>
+            <IconButton
+              aria-label="send"
+              onClick={handleSubmit}
+              disabled={!input.trim()}
+            >
+              <PaperPlaneTilt weight="light" />
+            </IconButton>
           )}
         </div>
+        {jobDescription && !aiSelectionChip ? (
+          <div className="mt-1 text-[10px] font-mono uppercase tracking-[0.12em] text-muted-foreground">
+            job description attached · {jobDescription.length} chars
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function SelectionChip({ text, onClear }: { text: string; onClear: () => void }) {
+  const preview = text.length > 120 ? `${text.slice(0, 120)}…` : text;
+  return (
+    <div className="mb-2 flex items-start gap-2 rounded-md border border-border bg-muted/40 px-2 py-1.5">
+      <div className="min-w-0 flex-1">
+        <div className="text-[10px] font-mono uppercase tracking-[0.14em] text-muted-foreground">
+          selection · {text.length} chars
+        </div>
+        <div className="mt-0.5 truncate font-mono text-[11px] text-foreground/90">
+          {preview}
+        </div>
+      </div>
+      <button
+        type="button"
+        aria-label="clear selection"
+        onClick={onClear}
+        className="shrink-0 rounded-sm p-0.5 text-muted-foreground hover:bg-background hover:text-foreground"
+      >
+        <X weight="light" className="size-3.5" />
+      </button>
+    </div>
+  );
+}
+
+function TurnBubble({ turn }: { turn: ChatTurn }) {
+  // Assistant replies are full-document rewrites — too noisy to render in-line.
+  // Show a compact summary instead; the diff view below holds the actual changes.
+  const preview =
+    turn.role === "assistant"
+      ? (extractFencedMarkdown(turn.content)
+          ? `rewrite · ${extractFencedMarkdown(turn.content)!.split("\n").length} lines`
+          : firstLine(turn.content, 120))
+      : turn.content;
+  return (
+    <BezelCard className="mb-2 px-3 py-2">
+      <div className="text-[10px] font-mono uppercase tracking-[0.14em] text-muted-foreground">
+        {turn.role}
+      </div>
+      <pre className="mt-1 whitespace-pre-wrap break-words font-mono text-[12px] leading-[1.55]">
+        {preview}
+      </pre>
+    </BezelCard>
+  );
+}
+
+function firstLine(text: string, max: number): string {
+  const first = (text.split("\n").find((l) => l.trim()) ?? "").trim();
+  return first.length > max ? `${first.slice(0, max)}…` : first;
+}
+
+function StreamingIndicator({ charCount }: { charCount: number }) {
+  return (
+    <div className="mb-2 flex items-center gap-3 rounded-md border border-border bg-background px-3 py-2">
+      <span className="relative inline-flex size-2 shrink-0">
+        <span className="absolute inset-0 rounded-full bg-brand" />
+        <span className="absolute inset-0 rounded-full bg-brand/60 animate-ping" />
+      </span>
+      <span className="text-[10px] font-mono uppercase tracking-[0.14em] text-muted-foreground">
+        rewriting
+      </span>
+      <span className="flex-1" />
+      <span
+        className="text-[10px] font-mono tabular text-muted-foreground"
+        data-tabular
+      >
+        {charCount.toString().padStart(4, "0")} chars
+      </span>
+    </div>
+  );
+}
+
+function EmptyCoach({ onPick }: { onPick: (s: string) => void }) {
+  const suggestions = [
+    "tighten my work bullets",
+    "rewrite my summary to sound senior",
+    "tailor to the attached job",
+  ];
+  return (
+    <div className="flex flex-col items-center gap-3 px-4 pt-8 text-center">
+      <Sparkle weight="light" className="size-6 text-muted-foreground" />
+      <h2 className="text-sm font-medium text-foreground">AI rewrite</h2>
+      <p className="max-w-[32ch] text-xs leading-relaxed text-muted-foreground">
+        the assistant returns a full rewrite. you review each change as a hunk
+        and accept or reject it before it lands.
+      </p>
+      <div className="flex flex-wrap justify-center gap-1.5 pt-2">
+        {suggestions.map((s) => (
+          <Button key={s} size="sm" variant="outline" onClick={() => onPick(s)}>
+            {s}
+          </Button>
+        ))}
       </div>
     </div>
   );

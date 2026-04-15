@@ -1,8 +1,29 @@
+// Chat route — full-document markdown rewrite. The model sees the user's
+// current markdown, any prior turns, and (optionally) a target job description.
+// It returns an updated, complete markdown resume. The client diffs the result
+// against the original and presents hunk-level accept/reject UI.
+
 import { NextRequest } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
 import type { Provider } from "@/lib/ai";
-import { toolsForAnthropic, toolsForOpenAI } from "@/lib/ai";
+
+interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+interface ChatRequestBody {
+  apiKey?: string;
+  messages: ChatMessage[];
+  markdown?: string;
+  jobDescription?: string | null;
+  mode?: "chat" | "analyze" | "tailor" | "rewrite_selection";
+  // Scoped rewrite (mode === "rewrite_selection"): the span the model should
+  // rewrite and the user's instruction for how to rewrite it.
+  selection?: string;
+  instruction?: string;
+}
 
 function detectProvider(key: string): Provider {
   if (key.startsWith("sk-ant-")) return "anthropic";
@@ -12,73 +33,12 @@ function detectProvider(key: string): Provider {
   return "openai";
 }
 
-function buildSystemPrompt(
-  documentText: string,
-  mode: string,
-  selectedText?: string,
-  prompt?: string
-): string {
-  if (mode === "selection") {
-    return [
-      "You are an expert resume writer and career coach embedded in a resume editor.",
-      "You have deep knowledge of what hiring managers and ATS systems look for.",
-      "",
-      "## The user's full resume (for context):",
-      "```",
-      documentText,
-      "```",
-      "",
-      "## Selected text the user is asking about:",
-      `"${selectedText}"`,
-      "",
-      prompt === "improve"
-        ? [
-            "## Your task:",
-            "Rewrite and improve ONLY the selected text. Return ONLY the replacement text.",
-            "- Use strong action verbs (Led, Designed, Shipped, Drove, Increased)",
-            "- Quantify impact wherever possible (%, $, time saved, users served)",
-            "- Be concise — no filler words",
-            "- Match the tone and style of the rest of the resume",
-            "- Do NOT add any explanation, preamble, quotes, or markdown — just the improved text",
-          ].join("\n")
-        : [
-            "## Your task:",
-            "Answer the user's question about the selected text.",
-            "- Be concise and actionable",
-            "- If suggesting changes, explain why briefly",
-            "- Reference specific parts of the text when relevant",
-          ].join("\n"),
-    ].join("\n");
-  }
-  return [
-    "You are an expert resume writer and career coach embedded in a resume editor called ResumeWise.",
-    "You have deep knowledge of what hiring managers, recruiters, and ATS systems look for.",
-    "You have tools to directly edit the resume.",
-    "",
-    "## The user's resume:",
-    "```",
-    documentText,
-    "```",
-    "",
-    "## Guidelines:",
-    "- ALWAYS start by explaining your analysis and what you plan to change BEFORE using any tools",
-    "- First give your thoughts, feedback, or suggestions as text",
-    "- Only use tools when the user explicitly asks you to make changes (e.g. 'improve this', 'fix that', 'rewrite my bullets')",
-    "- For general questions like 'what do you think?' or 'review this' — just give text feedback, don't edit anything",
-    "- When using replace_text, the 'find' parameter must EXACTLY match text from the resume",
-    "- After making edits, briefly explain what you changed and why",
-    "- Be concise — short paragraphs, bullet points",
-    "- Focus on impact, metrics, and strong action verbs",
-    "- Don't use markdown headers (the chat panel is small) — use bold and bullets instead",
-  ].join("\n");
-}
-
 const PROVIDER_MODELS: Record<Provider, string> = {
   anthropic: "claude-sonnet-4-6-20250627",
-  openai: "gpt-5.4-mini",
-  gemini: "gemini-3.1-flash-lite-preview",
-  grok: "grok-4.20",
-  openrouter: "anthropic/claude-sonnet-4-6-20250627",
+  openai: "gpt-5.4",
+  gemini: "gemini-3.1-pro-preview",
+  grok: "grok-4-1-fast-reasoning",
+  openrouter: "anthropic/claude-sonnet-4.6",
 };
 
 const OPENAI_COMPATIBLE_BASES: Record<string, string> = {
@@ -87,275 +47,223 @@ const OPENAI_COMPATIBLE_BASES: Record<string, string> = {
   gemini: "https://generativelanguage.googleapis.com/v1beta/openai",
 };
 
-const SSE_HEADERS = {
-  "Content-Type": "text/event-stream",
-  "Cache-Control": "no-cache",
-  Connection: "keep-alive",
-};
+// Humanizer rules. These constrain the model away from the cliches that make
+// LLM-written resumes obvious. Keep verbatim across prompt modes.
+const HARD_RULES = `Humanizer rules (non-negotiable):
+- No filler adjectives: "dynamic", "passionate", "driven", "seasoned", "robust", "cutting-edge", "proven track record".
+- No corporate verbs: "leverage", "spearheaded", "synergize", "orchestrate".
+- No em-dash pairs inside a sentence.
+- Prefer concrete verbs + numbers. "Shipped v2 API; cut p99 from 22m to 6m" beats "improved performance significantly".
+- Keep the candidate's voice and specific facts. Don't invent employers, dates, or numbers.
+- Dates stay exact. Never normalize "Present" or "Jan 2023" to another form.`;
 
-export async function POST(req: NextRequest) {
-  try {
-    const body = await req.json();
-    const { apiKey, messages, documentText, mode, selectedText, prompt, toolResults, useTools } = body;
+const STRUCTURE_NOTES = `Markdown convention the document follows:
+- Exactly one \`#\` for the candidate's name.
+- Lines below it (before the first \`##\`) are label + contact atoms separated by \` · \`.
+- \`##\` introduces a section (Summary, Experience, Education, Skills, Projects, Awards, etc.).
+- \`###\` introduces an item inside a section, in the form \`Title — Subtitle\` (em-dash).
+- The first non-bullet line under a \`###\` is the dates line (plus optional \` · Location\`).
+- Bullets use \`- \`. Preserve this convention exactly in your output.
 
-    if (!apiKey || typeof apiKey !== "string") {
-      return Response.json({ error: "API key required" }, { status: 401 });
-    }
+Inline formatting (use sparingly; preserve what exists):
+- \`**bold**\`, \`*italic*\`, \`_italic_\`, \`\\\`code\\\`\` work as in standard markdown.
+- Directive pairs: \`{bold}text{/bold}\`, \`{italic}text{/italic}\`, \`{underline}text{/underline}\`.
+- Named colors: \`{red}...{/red}\`, \`{green}\`, \`{blue}\`, \`{amber}\`, \`{purple}\`, \`{gray}\`, etc.
+- Palette tokens: \`{accent}...{/accent}\`, \`{muted}...{/muted}\`, \`{ink}...{/ink}\`.
+- Sizing: \`{size:12}...{/size}\`. Weight: \`{weight:600}...{/weight}\`.
+- Do NOT introduce new inline formatting unless the user asked. Preserve any
+  existing directives the user added.`;
 
-    const provider = detectProvider(apiKey);
-    const systemPrompt = buildSystemPrompt(documentText, mode, selectedText, prompt);
-    const model = PROVIDER_MODELS[provider];
-    const enableTools = useTools && mode === "chat";
+function buildSystemPrompt(mode: ChatRequestBody["mode"]): string {
+  if (mode === "rewrite_selection") {
+    return `You are a resume copy editor. Rewrite only the span the user highlighted, following their instruction. Return ONLY the replacement text — no code fences, no commentary, no quotes, no markdown headings, no leading bullet marker unless the original span started with one.
 
-    if (provider === "anthropic") {
-      return streamAnthropic(apiKey, systemPrompt, messages, model, enableTools, toolResults);
-    }
-    const baseURL = OPENAI_COMPATIBLE_BASES[provider];
-    return streamOpenAICompatible(apiKey, systemPrompt, messages, model, baseURL, enableTools, toolResults);
-  } catch (err: unknown) {
-    console.error("[chat route error]", err);
-    const message = err instanceof Error ? err.message : String(err);
-    if (message.includes("authentication") || message.includes("API key") || message.includes("Incorrect API")) {
-      return Response.json({ error: "Invalid API key" }, { status: 401 });
-    }
-    return Response.json({ error: message }, { status: 500 });
+${HARD_RULES}
+
+Output rules:
+- Preserve the original span's leading/trailing whitespace and line breaks (the replacement is spliced in verbatim).
+- If the original span was a single bullet line starting with "- ", keep that "- " prefix.
+- If the original was plain prose, stay plain prose.
+- Keep length reasonable relative to the original unless the instruction asks otherwise.`;
   }
+
+  const goal =
+    mode === "analyze"
+      ? "You are a resume reviewer. Analyze the resume against the target job and return a short critique — strongest alignment, biggest gaps, top three edits worth making. Do NOT rewrite the resume."
+      : mode === "tailor"
+        ? "You are a resume tailor. Produce a complete rewritten resume in the convention below, tuned to the target job. Change only what's needed; preserve the candidate's facts and voice."
+        : "You are a resume editor. Produce a complete rewritten resume in the convention below that incorporates the user's request. Change only what's needed; preserve untouched sections as-is.";
+
+  const output =
+    mode === "analyze"
+      ? "Output: plain prose critique. Do NOT wrap in code fences."
+      : "Output: a single, complete markdown resume, wrapped in triple backticks fenced with the word `markdown`. Emit nothing outside the fenced block.";
+
+  return `${goal}
+
+${STRUCTURE_NOTES}
+
+${HARD_RULES}
+
+${output}`;
 }
 
-// ─── Anthropic ───
-
-async function streamAnthropic(
-  apiKey: string,
-  systemPrompt: string,
-  messages: Array<{ role: string; content: unknown }>,
-  model: string,
-  enableTools: boolean,
-  toolResults?: Array<{ id: string; result: string }>
-) {
-  const client = new Anthropic({ apiKey });
-
-  // Build messages — handle _toolCalls and tool results
-  const apiMessages: Anthropic.MessageParam[] = [];
-  for (const m of messages as Array<any>) {
-    if (m.role === "assistant" && m._toolCalls?.length > 0) {
-      // Build assistant content with text + tool_use blocks
-      const content: any[] = [];
-      if (m.content) content.push({ type: "text", text: m.content });
-      for (const tc of m._toolCalls) {
-        content.push({ type: "tool_use", id: tc.id, name: tc.name, input: tc.args });
-      }
-      apiMessages.push({ role: "assistant", content });
-    } else if (m.role === "user" && typeof m.content === "string") {
-      apiMessages.push({ role: "user", content: m.content });
-    } else if (m.role === "assistant" && typeof m.content === "string") {
-      apiMessages.push({ role: "assistant", content: m.content });
-    } else {
-      apiMessages.push(m as Anthropic.MessageParam);
-    }
+function buildUserPreamble(body: ChatRequestBody): string {
+  const parts: string[] = [];
+  parts.push("Current resume markdown:");
+  parts.push("```markdown");
+  parts.push(body.markdown ?? "");
+  parts.push("```");
+  if (body.jobDescription && body.jobDescription.trim()) {
+    parts.push("");
+    parts.push("Target job description:");
+    parts.push("```");
+    parts.push(body.jobDescription.trim());
+    parts.push("```");
   }
+  return parts.join("\n");
+}
 
-  // Append tool results as a user message with tool_result blocks
-  if (toolResults && toolResults.length > 0) {
-    apiMessages.push({
-      role: "user",
-      content: toolResults.map((tr) => ({
-        type: "tool_result" as const,
-        tool_use_id: tr.id,
-        content: tr.result,
-      })),
+function buildSelectionPrompt(selection: string, instruction: string): string {
+  return [
+    "Original span to rewrite:",
+    "```",
+    selection,
+    "```",
+    "",
+    `Instruction: ${instruction}`,
+    "",
+    "Return only the replacement text.",
+  ].join("\n");
+}
+
+export async function POST(req: NextRequest) {
+  let body: ChatRequestBody;
+  try {
+    body = (await req.json()) as ChatRequestBody;
+  } catch {
+    return new Response(JSON.stringify({ error: "Invalid JSON body" }), {
+      status: 400,
+      headers: { "content-type": "application/json" },
     });
   }
 
-  const stream = await client.messages.create({
-    model,
-    max_tokens: 4096,
-    system: systemPrompt,
-    messages: apiMessages,
-    ...(enableTools ? { tools: toolsForAnthropic() as any } : {}),
-    stream: true,
-  });
+  const isSelection = body.mode === "rewrite_selection";
+
+  if (!isSelection && (!body.markdown || typeof body.markdown !== "string")) {
+    return new Response(JSON.stringify({ error: "markdown required" }), {
+      status: 400,
+      headers: { "content-type": "application/json" },
+    });
+  }
+  if (isSelection && (!body.selection || !body.instruction)) {
+    return new Response(
+      JSON.stringify({ error: "selection and instruction required" }),
+      {
+        status: 400,
+        headers: { "content-type": "application/json" },
+      }
+    );
+  }
+
+  const apiKey: string | undefined =
+    (typeof body.apiKey === "string" && body.apiKey) || process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    return new Response(JSON.stringify({ error: "API key required" }), {
+      status: 401,
+      headers: { "content-type": "application/json" },
+    });
+  }
+
+  const provider = detectProvider(apiKey);
+  const model = PROVIDER_MODELS[provider];
+  const system = buildSystemPrompt(body.mode);
+
+  let userMessages: ChatMessage[];
+  if (isSelection) {
+    userMessages = [
+      {
+        role: "user",
+        content: buildSelectionPrompt(body.selection!, body.instruction!),
+      },
+    ];
+  } else {
+    const history: ChatMessage[] = [
+      ...(body.messages ?? []).filter(
+        (m) => (m.role === "user" || m.role === "assistant") && m.content
+      ),
+    ];
+    const preamble = buildUserPreamble(body);
+    const lastUser = history[history.length - 1];
+    userMessages =
+      lastUser && lastUser.role === "user"
+        ? [
+            ...history.slice(0, -1),
+            { role: "user" as const, content: `${preamble}\n\nRequest: ${lastUser.content}` },
+          ]
+        : [...history, { role: "user" as const, content: `${preamble}\n\nRequest: rewrite as needed.` }];
+  }
 
   const encoder = new TextEncoder();
-  const readable = new ReadableStream({
-    async start(controller) {
-      try {
-        let currentToolId = "";
-        let currentToolName = "";
-        let currentToolInput = "";
 
-        for await (const event of stream) {
-          if (event.type === "content_block_start") {
-            const block = (event as any).content_block;
-            if (block?.type === "tool_use") {
-              currentToolId = block.id;
-              currentToolName = block.name;
-              currentToolInput = "";
-            }
-          } else if (event.type === "content_block_delta") {
-            if (event.delta.type === "text_delta") {
-              controller.enqueue(
-                encoder.encode(`data: ${JSON.stringify({ text: event.delta.text })}\n\n`)
-              );
-            } else if ((event.delta as any).type === "input_json_delta") {
-              currentToolInput += (event.delta as any).partial_json || "";
-            }
-          } else if (event.type === "content_block_stop") {
-            if (currentToolName) {
-              let args = {};
-              try { args = JSON.parse(currentToolInput); } catch { /* empty */ }
-              controller.enqueue(
-                encoder.encode(`data: ${JSON.stringify({
-                  tool_call: { id: currentToolId, name: currentToolName, args },
-                })}\n\n`)
-              );
-              currentToolId = "";
-              currentToolName = "";
-              currentToolInput = "";
-            }
-          } else if (event.type === "message_delta") {
-            const stopReason = (event as any).delta?.stop_reason;
-            if (stopReason === "tool_use") {
-              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ stop_reason: "tool_use" })}\n\n`));
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const send = (event: string, data: unknown) => {
+        controller.enqueue(
+          encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+        );
+      };
+
+      try {
+        if (provider === "anthropic") {
+          const client = new Anthropic({ apiKey });
+          const s = await client.messages.stream({
+            model,
+            max_tokens: 8000,
+            system,
+            messages: userMessages,
+          });
+          for await (const event of s) {
+            if (
+              event.type === "content_block_delta" &&
+              event.delta.type === "text_delta"
+            ) {
+              send("chunk", { text: event.delta.text });
             }
           }
+          send("done", {});
+        } else {
+          const baseURL = OPENAI_COMPATIBLE_BASES[provider];
+          const client = new OpenAI({ apiKey, ...(baseURL ? { baseURL } : {}) });
+          const s = await client.chat.completions.create({
+            model,
+            max_completion_tokens: 8000,
+            stream: true,
+            messages: [
+              { role: "system", content: system },
+              ...userMessages,
+            ],
+          });
+          for await (const chunk of s) {
+            const delta = chunk.choices[0]?.delta?.content;
+            if (delta) send("chunk", { text: delta });
+          }
+          send("done", {});
         }
-        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-        controller.close();
-      } catch (err) {
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: String(err) })}\n\n`));
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        send("error", { message });
+      } finally {
         controller.close();
       }
     },
   });
 
-  return new Response(readable, { headers: SSE_HEADERS });
-}
-
-// ─── OpenAI-Compatible ───
-
-async function streamOpenAICompatible(
-  apiKey: string,
-  systemPrompt: string,
-  messages: Array<{ role: string; content: unknown }>,
-  model: string,
-  baseURL: string | undefined,
-  enableTools: boolean,
-  toolResults?: Array<{ id: string; result: string }>
-) {
-  const client = new OpenAI({
-    apiKey,
-    ...(baseURL ? { baseURL } : {}),
-  });
-
-  // Build messages — handle _toolCalls for proper tool_calls format
-  const apiMessages: OpenAI.ChatCompletionMessageParam[] = [
-    { role: "system", content: systemPrompt },
-  ];
-
-  for (const m of messages as Array<any>) {
-    if (m.role === "assistant" && m._toolCalls?.length > 0) {
-      // Assistant message with tool_calls
-      apiMessages.push({
-        role: "assistant",
-        content: m.content || null,
-        tool_calls: m._toolCalls.map((tc: any) => ({
-          id: tc.id,
-          type: "function" as const,
-          function: { name: tc.name, arguments: JSON.stringify(tc.args) },
-        })),
-      });
-    } else if (m.role === "assistant" && typeof m.content === "string") {
-      apiMessages.push({ role: "assistant", content: m.content });
-    } else if (m.role === "user" && typeof m.content === "string") {
-      apiMessages.push({ role: "user", content: m.content });
-    } else {
-      apiMessages.push(m as any);
-    }
-  }
-
-  // Append tool results
-  if (toolResults && toolResults.length > 0) {
-    for (const tr of toolResults) {
-      apiMessages.push({
-        role: "tool",
-        tool_call_id: tr.id,
-        content: tr.result,
-      });
-    }
-  }
-
-  const stream = await client.chat.completions.create({
-    model,
-    max_completion_tokens: 4096,
-    messages: apiMessages,
-    ...(enableTools ? { tools: toolsForOpenAI() } : {}),
-    stream: true,
-  });
-
-  const encoder = new TextEncoder();
-  const readable = new ReadableStream({
-    async start(controller) {
-      try {
-        // Accumulate tool calls across chunks
-        const toolCalls: Map<number, { id: string; name: string; arguments: string }> = new Map();
-        let hasToolCalls = false;
-
-        for await (const chunk of stream) {
-          const choice = chunk.choices[0];
-          if (!choice) continue;
-
-          // Text content
-          const text = choice.delta?.content;
-          if (text) {
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ text })}\n\n`));
-          }
-
-          // Tool calls
-          const deltaToolCalls = choice.delta?.tool_calls;
-          if (deltaToolCalls) {
-            hasToolCalls = true;
-            for (const tc of deltaToolCalls) {
-              const existing = toolCalls.get(tc.index);
-              if (!existing) {
-                toolCalls.set(tc.index, {
-                  id: tc.id || "",
-                  name: tc.function?.name || "",
-                  arguments: tc.function?.arguments || "",
-                });
-              } else {
-                if (tc.id) existing.id = tc.id;
-                if (tc.function?.name) existing.name += tc.function.name;
-                existing.arguments += tc.function?.arguments || "";
-              }
-            }
-          }
-
-          // Check finish reason
-          if (choice.finish_reason === "tool_calls" || (choice.finish_reason === "stop" && hasToolCalls)) {
-            // Emit all accumulated tool calls
-            for (const [, tc] of toolCalls) {
-              let args = {};
-              try { args = JSON.parse(tc.arguments); } catch { /* empty */ }
-              controller.enqueue(
-                encoder.encode(`data: ${JSON.stringify({
-                  tool_call: { id: tc.id, name: tc.name, args },
-                })}\n\n`)
-              );
-            }
-            if (hasToolCalls) {
-              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ stop_reason: "tool_use" })}\n\n`));
-            }
-          }
-        }
-
-        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-        controller.close();
-      } catch (err) {
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: String(err) })}\n\n`));
-        controller.close();
-      }
+  return new Response(stream, {
+    headers: {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache, no-transform",
+      "x-accel-buffering": "no",
     },
   });
-
-  return new Response(readable, { headers: SSE_HEADERS });
 }
