@@ -1,10 +1,10 @@
 // Smoke test for the markdown resume parser. Run with: npm run test:md
 //
-// Checks that SAMPLE_MARKDOWN parses into the expected shape — right number of
-// sections, header name, a few representative items and bullets. Fails loud
-// with process.exit(1) on any mismatch.
+// Verifies that SAMPLE_MARKDOWN parses into a faithful block tree — headings
+// at their original levels, a contact block, section-body paragraphs and
+// lists in source order, no synthesized semantic fields.
 
-import { parseResumeMarkdown, SAMPLE_MARKDOWN } from "../src/lib/resume-md";
+import { parseResumeMarkdown, SAMPLE_MARKDOWN, type ResumeBlock } from "../src/lib/resume-md";
 
 function assert(cond: unknown, msg: string) {
   if (!cond) {
@@ -13,54 +13,56 @@ function assert(cond: unknown, msg: string) {
   }
 }
 
-const ast = parseResumeMarkdown(SAMPLE_MARKDOWN);
+const doc = parseResumeMarkdown(SAMPLE_MARKDOWN);
+const blocks = doc.blocks;
 
-assert(ast.header.name === "Jane Doe", `header.name = "${ast.header.name}"`);
-assert(ast.header.label === "Senior Product Engineer", `header.label = "${ast.header.label}"`);
-assert(ast.header.contacts.length >= 4, `contacts.length = ${ast.header.contacts.length}`);
-assert(ast.header.contacts.includes("jane@doe.com"), "missing email contact");
+function findIndex(pred: (b: ResumeBlock) => boolean, from = 0): number {
+  for (let i = from; i < blocks.length; i++) if (pred(blocks[i])) return i;
+  return -1;
+}
 
-const keys = ast.sections.map((s) => s.key);
-assert(keys.includes("summary"), "missing summary section");
-assert(keys.includes("experience"), "missing experience section");
-assert(keys.includes("education"), "missing education section");
-assert(keys.includes("skills"), "missing skills section");
-assert(keys.includes("projects"), "missing projects section");
-assert(keys.includes("awards"), "missing awards section");
+// H1 is first.
+assert(blocks[0].kind === "heading" && blocks[0].level === 1 && blocks[0].text === "Jane Doe", "H1 should be 'Jane Doe'");
 
-const summary = ast.sections.find((s) => s.key === "summary");
-assert(summary !== undefined, "summary not found");
-assert((summary!.paragraphs?.length ?? 0) >= 1, "summary should have a paragraph");
+// A contacts block appears.
+const contactsIdx = findIndex((b) => b.kind === "contacts");
+assert(contactsIdx !== -1, "expected a contacts block");
+const contacts = blocks[contactsIdx];
+assert(contacts.kind === "contacts" && contacts.atoms.includes("jane@doe.com"), "email should be in contacts");
 
-const experience = ast.sections.find((s) => s.key === "experience")!;
-assert(experience.items.length === 3, `experience items = ${experience.items.length}`);
+// Every ## heading is preserved as level-2.
+const level2 = blocks.filter((b) => b.kind === "heading" && b.level === 2).map((b) => (b as Extract<ResumeBlock, { kind: "heading" }>).text);
+for (const want of ["Summary", "Experience", "Education", "Skills", "Projects", "Awards"]) {
+  assert(level2.includes(want), `missing ## ${want}`);
+}
 
-const first = experience.items[0];
-assert(first.title === "Acme Corp", `first.title = "${first.title}"`);
-assert(first.subtitle === "Staff Engineer", `first.subtitle = "${first.subtitle}"`);
-assert(first.dates === "Jan 2023 – Present", `first.dates = "${first.dates}"`);
-assert(first.location === "Remote", `first.location = "${first.location}"`);
-assert(first.bullets.length === 3, `first.bullets.length = ${first.bullets.length}`);
-assert(first.bullets[0].startsWith("Led the rewrite"), `first bullet = "${first.bullets[0]}"`);
+// ### Acme Corp — Staff Engineer is kept intact (no title/subtitle split).
+const acmeH3 = blocks.find((b) => b.kind === "heading" && b.level === 3 && b.text.startsWith("Acme Corp"));
+assert(acmeH3 && acmeH3.kind === "heading" && acmeH3.text === "Acme Corp — Staff Engineer", `acme H3 text = "${(acmeH3 as { text?: string } | undefined)?.text}"`);
 
-const skills = ast.sections.find((s) => s.key === "skills")!;
-assert(skills.items.length === 3, `skills items = ${skills.items.length}`);
-const langs = skills.items.find((i) => i.title === "Languages");
-assert(langs !== undefined, "skills: Languages group missing");
-assert(langs!.bullets.includes("TypeScript"), "TypeScript missing from Languages");
-assert(langs!.bullets.includes("Rust"), "Rust missing from Languages");
+// The dates line under the Acme H3 is a paragraph, not a magic "dates" field.
+const acmeIdx = blocks.indexOf(acmeH3!);
+const afterAcme = blocks[acmeIdx + 1];
+assert(afterAcme.kind === "paragraph" && afterAcme.text.startsWith("Jan 2023"), `paragraph after acme H3: ${JSON.stringify(afterAcme)}`);
 
-// Malformed input should not throw.
+// The bullet list under Acme is a single list block with the expected items.
+const afterDates = blocks[acmeIdx + 2];
+assert(afterDates.kind === "list" && afterDates.items.length === 3, `expected list of 3 under Acme, got ${JSON.stringify(afterDates)}`);
+assert(afterDates.kind === "list" && afterDates.items[0].startsWith("Led the rewrite"), "first bullet");
+
+// Skills block: the list items are preserved as lines with "Label: ..." intact.
+const skillsH2Idx = blocks.findIndex((b) => b.kind === "heading" && b.level === 2 && b.text === "Skills");
+const skillsList = blocks[skillsH2Idx + 1];
+assert(skillsList.kind === "list" && skillsList.items.length === 3, `skills list items = ${skillsList.kind === "list" ? skillsList.items.length : "n/a"}`);
+assert(skillsList.kind === "list" && skillsList.items[0].startsWith("Languages:"), "first skills line should begin with Languages:");
+
+// Malformed / empty inputs must not throw.
 const junk = parseResumeMarkdown("plain text with no structure at all\nmore text");
-assert(typeof junk.header.name === "string", "malformed input yielded non-string name");
-assert(Array.isArray(junk.sections), "malformed input yielded non-array sections");
+assert(Array.isArray(junk.blocks), "malformed input should produce blocks array");
 
-// Empty string should not throw.
 const empty = parseResumeMarkdown("");
-assert(empty.header.name === "", "empty input should yield empty name");
-assert(empty.sections.length === 0, "empty input should yield no sections");
+assert(empty.blocks.length === 0, "empty input should yield no blocks");
 
 console.log("OK — parser smoke test passed");
-console.log(`  sections: ${keys.join(", ")}`);
-console.log(`  experience items: ${experience.items.length}`);
-console.log(`  skills groups: ${skills.items.length}`);
+console.log(`  total blocks: ${blocks.length}`);
+console.log(`  ## headings: ${level2.join(", ")}`);

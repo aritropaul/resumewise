@@ -49,7 +49,7 @@ async function main() {
   await preload(family);
 
   const ast = parseResumeMarkdown(SAMPLE_MARKDOWN);
-  console.log(`[smoke] sections=${ast.sections.length} font=${theme.font}`);
+  console.log(`[smoke] blocks=${ast.blocks.length} font=${theme.font}`);
   console.log(`[smoke] registered families:`, Font.getRegisteredFontFamilies());
 
   try {

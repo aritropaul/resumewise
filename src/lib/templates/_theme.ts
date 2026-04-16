@@ -212,9 +212,7 @@ function defaultCaseForKind(kind: NodeKind, global: HeadingCase): TextCase {
 }
 
 function defaultColorTokenForKind(kind: NodeKind): string {
-  if (kind === "label" || kind === "contact" || kind === "dates" || kind === "location") {
-    return "muted";
-  }
+  if (kind === "contact" || kind === "dates") return "muted";
   return "ink";
 }
 
@@ -226,7 +224,7 @@ function defaultSizeForKind(
 ): number {
   if (kind === "name") return nameSize;
   if (kind === "section") return headingSize;
-  if (kind === "dates" || kind === "location" || kind === "contact") return bodySize - 1;
+  if (kind === "contact" || kind === "dates") return bodySize - 1;
   return bodySize;
 }
 

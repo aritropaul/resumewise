@@ -24,13 +24,11 @@ export type SectionDivider = "none" | "rule" | "accent-bar";
 export type LinkStyle = "plain" | "underline" | "accent";
 
 export type NodeKind =
-  | "name"      // H1 — person's name
-  | "label"     // tagline under name
-  | "contact"   // contact row (email · phone · location)
-  | "section"   // H2 — section heading
-  | "role"      // H3 — item title (role · company)
-  | "dates"     // item date range
-  | "location"  // item location
+  | "name"      // H1
+  | "contact"   // contact row (email · phone · url)
+  | "section"   // H2
+  | "role"      // H3
+  | "dates"     // {dates}...{/dates} — user-applied, always right-aligned
   | "paragraph"
   | "bullet"
   | "link";

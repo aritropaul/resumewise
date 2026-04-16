@@ -10,6 +10,10 @@ import {
   TextB,
   TextItalic,
   TextUnderline,
+  TextAlignLeft,
+  TextAlignCenter,
+  TextAlignRight,
+  CalendarBlank,
 } from "@phosphor-icons/react";
 import { HexColorPicker } from "react-colorful";
 import type {
@@ -162,6 +166,34 @@ export function DocEditorPanel({ mode = "edit" }: { mode?: CenterTab } = {}) {
     [editorSelection, markdown, setMarkdown, requestSelectionApply]
   );
 
+  // Alignment is exclusive: clicking a second align removes any prior align
+  // on the same selection first, then applies the new one. Clicking the same
+  // align again unwraps (turns it off).
+  const applyAlign = React.useCallback(
+    (target: "left" | "center" | "right"): boolean => {
+      if (!editorSelection || editorSelection.end <= editorSelection.start) return false;
+      let md = markdown;
+      let sel = { start: editorSelection.start, end: editorSelection.end };
+      const others = (["left", "center", "right"] as const).filter((n) => n !== target);
+      for (const name of others) {
+        const st = describeState(md, sel.start, sel.end, name);
+        if (st.active) {
+          const r = toggleOrReplace(md, sel.start, sel.end, { name });
+          if (r) {
+            md = r.md;
+            sel = r.selection;
+          }
+        }
+      }
+      const r = toggleOrReplace(md, sel.start, sel.end, { name: target });
+      if (!r) return false;
+      setMarkdown(r.md);
+      requestSelectionApply(r.selection);
+      return true;
+    },
+    [editorSelection, markdown, setMarkdown, requestSelectionApply]
+  );
+
   const [openGroups, setOpenGroups] = React.useState<Record<GroupId, boolean>>(
     DEFAULT_OPEN
   );
@@ -294,6 +326,7 @@ export function DocEditorPanel({ mode = "edit" }: { mode?: CenterTab } = {}) {
           selection={editorSelection}
           hasSelection={hasSelection}
           applyDirective={applyDirective}
+          applyAlign={applyAlign}
         />
       </Group>
     </div>
@@ -304,12 +337,10 @@ export function DocEditorPanel({ mode = "edit" }: { mode?: CenterTab } = {}) {
 
 const NODE_KINDS: { kind: NodeKind; label: string }[] = [
   { kind: "name", label: "Name" },
-  { kind: "label", label: "Tagline" },
   { kind: "contact", label: "Contact" },
   { kind: "section", label: "Section header" },
   { kind: "role", label: "Role / title" },
   { kind: "dates", label: "Dates" },
-  { kind: "location", label: "Location" },
   { kind: "paragraph", label: "Paragraph" },
   { kind: "bullet", label: "Bullet" },
   { kind: "link", label: "Link" },
@@ -318,12 +349,10 @@ const NODE_KINDS: { kind: NodeKind; label: string }[] = [
 const NODE_OPEN_STORAGE_KEY = "resumewise-style-node-open";
 const DEFAULT_NODE_OPEN: Record<NodeKind, boolean> = {
   name: true,
-  label: false,
   contact: false,
   section: false,
   role: false,
   dates: false,
-  location: false,
   paragraph: false,
   bullet: false,
   link: false,
@@ -479,12 +508,10 @@ const TEXT_CASE_OPTIONS: { value: TextCase; label: string }[] = [
 
 const FALLBACK_EXAMPLES: Record<NodeKind, string> = {
   name: "Your Name",
-  label: "Your tagline",
   contact: "you@example.com",
   section: "Section",
   role: "Role — Company",
-  dates: "Dates",
-  location: "Location",
+  dates: "Jan 2023 – Present",
   paragraph: "Summary paragraph.",
   bullet: "A bullet point from your resume.",
   link: "example.com",
@@ -499,68 +526,64 @@ function extractLinkFromText(s: string): string | null {
 }
 
 function pickExample(kind: NodeKind, ast: ResumeAst): string {
+  const blocks = ast.blocks;
   switch (kind) {
-    case "name":
-      return ast.header.name || FALLBACK_EXAMPLES.name;
-    case "label":
-      return ast.header.label || FALLBACK_EXAMPLES.label;
-    case "contact":
-      return ast.header.contacts[0] || FALLBACK_EXAMPLES.contact;
-    case "section":
-      return ast.sections[0]?.heading || FALLBACK_EXAMPLES.section;
+    case "name": {
+      const h1 = blocks.find((b) => b.kind === "heading" && b.level === 1);
+      if (h1 && h1.kind === "heading") return h1.text;
+      return FALLBACK_EXAMPLES.name;
+    }
+    case "contact": {
+      const c = blocks.find((b) => b.kind === "contacts");
+      if (c && c.kind === "contacts" && c.atoms[0]) return c.atoms[0];
+      return FALLBACK_EXAMPLES.contact;
+    }
+    case "section": {
+      const h2 = blocks.find((b) => b.kind === "heading" && b.level === 2);
+      if (h2 && h2.kind === "heading") return h2.text;
+      return FALLBACK_EXAMPLES.section;
+    }
     case "role": {
-      for (const s of ast.sections) {
-        const item = s.items[0];
-        if (!item) continue;
-        const parts = [item.title, item.subtitle].filter(Boolean);
-        if (parts.length) return parts.join(" — ");
-      }
+      const h3 = blocks.find((b) => b.kind === "heading" && b.level === 3);
+      if (h3 && h3.kind === "heading") return h3.text;
       return FALLBACK_EXAMPLES.role;
     }
     case "dates": {
-      for (const s of ast.sections) {
-        for (const item of s.items) if (item.dates) return item.dates;
+      const datesRe = /\{dates\}([\s\S]*?)\{\/dates\}/;
+      for (const b of blocks) {
+        if (b.kind === "heading" || b.kind === "paragraph") {
+          const m = b.text.match(datesRe);
+          if (m) return m[1].trim();
+        }
       }
       return FALLBACK_EXAMPLES.dates;
     }
-    case "location": {
-      for (const s of ast.sections) {
-        for (const item of s.items) if (item.location) return item.location;
-      }
-      return ast.header.location || FALLBACK_EXAMPLES.location;
-    }
     case "paragraph": {
-      for (const s of ast.sections) {
-        const p = s.paragraphs?.[0];
-        if (p) return p;
-      }
+      const p = blocks.find((b) => b.kind === "paragraph");
+      if (p && p.kind === "paragraph") return p.text;
       return FALLBACK_EXAMPLES.paragraph;
     }
     case "bullet": {
-      for (const s of ast.sections) {
-        const sb = s.bullets?.[0];
-        if (sb) return sb;
-        for (const item of s.items) if (item.bullets[0]) return item.bullets[0];
+      for (const b of blocks) {
+        if (b.kind === "list" && b.items[0]) return b.items[0];
       }
       return FALLBACK_EXAMPLES.bullet;
     }
     case "link": {
-      for (const c of ast.header.contacts) {
-        const l = extractLinkFromText(c);
-        if (l) return l;
-      }
-      for (const s of ast.sections) {
-        for (const p of s.paragraphs ?? []) {
-          const l = extractLinkFromText(p);
+      for (const b of blocks) {
+        if (b.kind === "contacts") {
+          for (const a of b.atoms) {
+            const l = extractLinkFromText(a);
+            if (l) return l;
+          }
+        }
+        if (b.kind === "paragraph") {
+          const l = extractLinkFromText(b.text);
           if (l) return l;
         }
-        for (const b of s.bullets ?? []) {
-          const l = extractLinkFromText(b);
-          if (l) return l;
-        }
-        for (const item of s.items) {
-          for (const b of item.bullets) {
-            const l = extractLinkFromText(b);
+        if (b.kind === "list") {
+          for (const it of b.items) {
+            const l = extractLinkFromText(it);
             if (l) return l;
           }
         }
@@ -1731,11 +1754,13 @@ function SelectionTextControls({
   selection,
   hasSelection,
   applyDirective,
+  applyAlign,
 }: {
   markdown: string;
   selection: { start: number; end: number } | null;
   hasSelection: boolean;
   applyDirective: (d: Directive) => boolean;
+  applyAlign: (target: "left" | "center" | "right") => boolean;
 }) {
   // Detect current state per-directive so toggles/inputs reflect reality.
   const state = React.useMemo(() => {
@@ -1748,9 +1773,16 @@ function SelectionTextControls({
         size: "",
         color: "",
         font: "",
+        align: "" as "" | "left" | "center" | "right",
+        dates: false,
       };
     }
     const s = selection;
+    const align =
+      describeState(markdown, s.start, s.end, "left").active ? "left" :
+      describeState(markdown, s.start, s.end, "center").active ? "center" :
+      describeState(markdown, s.start, s.end, "right").active ? "right" :
+      "";
     return {
       bold: describeState(markdown, s.start, s.end, "bold").active,
       italic: describeState(markdown, s.start, s.end, "italic").active,
@@ -1759,6 +1791,8 @@ function SelectionTextControls({
       size: describeState(markdown, s.start, s.end, "size").value,
       color: describeState(markdown, s.start, s.end, "color").value,
       font: describeState(markdown, s.start, s.end, "font").value,
+      align,
+      dates: describeState(markdown, s.start, s.end, "dates").active,
     };
   }, [markdown, selection]);
 
@@ -1797,6 +1831,36 @@ function SelectionTextControls({
           onClick={() => applyDirective({ name: "underline" })}
         >
           <TextUnderline weight="bold" className="size-3.5" />
+        </ToggleButton>
+        <div className="mx-1 h-4 w-px bg-border" aria-hidden />
+        <ToggleButton
+          active={state.align === "left"}
+          aria-label="align left"
+          onClick={() => applyAlign("left")}
+        >
+          <TextAlignLeft weight="bold" className="size-3.5" />
+        </ToggleButton>
+        <ToggleButton
+          active={state.align === "center"}
+          aria-label="align center"
+          onClick={() => applyAlign("center")}
+        >
+          <TextAlignCenter weight="bold" className="size-3.5" />
+        </ToggleButton>
+        <ToggleButton
+          active={state.align === "right"}
+          aria-label="align right"
+          onClick={() => applyAlign("right")}
+        >
+          <TextAlignRight weight="bold" className="size-3.5" />
+        </ToggleButton>
+        <div className="mx-1 h-4 w-px bg-border" aria-hidden />
+        <ToggleButton
+          active={state.dates}
+          aria-label="dates"
+          onClick={() => applyDirective({ name: "dates" })}
+        >
+          <CalendarBlank weight="bold" className="size-3.5" />
         </ToggleButton>
       </div>
 

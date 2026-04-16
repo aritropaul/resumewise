@@ -1,5 +1,6 @@
-// classic — sans, hairline rule headings. Honors every theme knob; signature
-// font (Inter) is a default suggestion only.
+// classic — sans, hairline rule section headings. Walks the block tree in
+// source order. No layout synthesis; heading level drives the styling, author
+// drives everything else.
 
 import React from "react";
 import {
@@ -10,7 +11,7 @@ import {
   Text,
   View,
 } from "@react-pdf/renderer";
-import type { ResumeAst, ResumeAstItem, ResumeAstSection } from "../resume-md";
+import type { ResumeBlock, ResumeDoc } from "../resume-md";
 import type { NodeStyleMap, ResumeTheme } from "../resume-theme";
 import {
   bulletGlyph,
@@ -25,14 +26,12 @@ import {
 
 export const CLASSIC_BASELINE: NodeStyleMap = {
   name: { fontWeight: "semibold", textCase: "uppercase", letterSpacing: 1.4, color: "ink" },
-  label: { color: "muted" },
   contact: { color: "muted" },
   section: { fontWeight: "medium" },
   role: { fontWeight: "semibold" },
   dates: { color: "muted" },
-  location: { color: "muted" },
 };
-import { InlineText, contactHref, isAstEmpty } from "./_shared";
+import { InlineText, SplitRow, alignToJustify, contactHref, extractBlockLayout, isAstEmpty, withAlign } from "./_shared";
 
 function nodeStyleObj(n: ReturnType<typeof resolveNodeStyle>) {
   return {
@@ -53,12 +52,10 @@ function buildStyles(theme: ResumeTheme) {
   const fontFamily = safeFontFamily(t.font);
   const body = t.bodySize;
   const nameN = resolveNodeStyle(theme, "name", CLASSIC_BASELINE);
-  const labelN = resolveNodeStyle(theme, "label", CLASSIC_BASELINE);
   const contactN = resolveNodeStyle(theme, "contact", CLASSIC_BASELINE);
   const sectionN = resolveNodeStyle(theme, "section", CLASSIC_BASELINE);
   const roleN = resolveNodeStyle(theme, "role", CLASSIC_BASELINE);
   const datesN = resolveNodeStyle(theme, "dates", CLASSIC_BASELINE);
-  const locationN = resolveNodeStyle(theme, "location", CLASSIC_BASELINE);
   const p = resolveNodeStyle(theme, "paragraph", CLASSIC_BASELINE);
   const bullet = resolveNodeStyle(theme, "bullet", CLASSIC_BASELINE);
   const linkNode = resolveNodeStyle(theme, "link", CLASSIC_BASELINE);
@@ -80,7 +77,6 @@ function buildStyles(theme: ResumeTheme) {
         lineHeight: t.lineHeight,
       },
       name: nodeStyleObj(nameN),
-      label: { ...nodeStyleObj(labelN), marginTop: 3 },
       contactRow: {
         flexDirection: "row",
         flexWrap: "wrap",
@@ -99,19 +95,14 @@ function buildStyles(theme: ResumeTheme) {
         marginBottom: Math.max(2, t.sectionSpacing * 0.28) + sectionN.marginBottom,
         ...border,
       },
-      itemHeader: {
-        flexDirection: "row",
-        justifyContent: "space-between",
+      roleHeading: {
+        ...nodeStyleObj(roleN),
         marginTop: Math.max(4, t.sectionSpacing * 0.4),
       },
-      itemTitle: nodeStyleObj(roleN),
-      itemMetaRow: { flexDirection: "row", alignItems: "baseline" },
-      dates: nodeStyleObj(datesN),
-      location: nodeStyleObj(locationN),
-      metaSep: {
-        fontSize: Math.min(datesN.fontSize, locationN.fontSize),
-        color: t.muted,
-        marginHorizontal: 4,
+      subHeading: {
+        ...nodeStyleObj(p),
+        fontWeight: 600,
+        marginTop: 4,
       },
       bulletRow: { flexDirection: "row", marginTop: 2, paddingLeft: 2 },
       bulletDot: { width: 8, color: bullet.color },
@@ -119,6 +110,7 @@ function buildStyles(theme: ResumeTheme) {
         flex: 1,
         ...nodeStyleObj(bullet),
       },
+      dates: nodeStyleObj(datesN),
       paragraph: {
         marginTop: 4,
         ...nodeStyleObj(p),
@@ -138,105 +130,121 @@ interface Ctx {
   link: LinkStyleProps;
 }
 
-function Header({ ast, ctx }: { ast: ResumeAst; ctx: Ctx }) {
-  const { name, label, contacts } = ast.header;
+function ContactRow({ atoms, ctx }: { atoms: string[]; ctx: Ctx }) {
   const { styles, tkns, link } = ctx;
   return (
-    <View>
-      {name ? <InlineText text={name} style={styles.name} tkns={tkns} linkBase={link} /> : null}
-      {label ? <InlineText text={label} style={styles.label} tkns={tkns} linkBase={link} /> : null}
-      {contacts.length > 0 ? (
-        <View style={styles.contactRow}>
-          {contacts.map((atom, i) => {
-            const href = contactHref(atom);
-            return (
-              <View key={i} style={styles.contactItem}>
-                {href ? (
-                  <Link style={styles.link} src={href}>{atom}</Link>
-                ) : (
-                  <InlineText text={atom} tkns={tkns} linkBase={link} />
-                )}
-              </View>
-            );
-          })}
-        </View>
-      ) : null}
+    <View style={styles.contactRow}>
+      {atoms.map((atom, i) => {
+        const href = contactHref(atom);
+        return (
+          <View key={i} style={styles.contactItem}>
+            {href ? (
+              <Link style={styles.link} src={href}>{atom}</Link>
+            ) : (
+              <InlineText text={atom} tkns={tkns} linkBase={link} />
+            )}
+          </View>
+        );
+      })}
     </View>
   );
 }
 
-function Bullets({ items, ctx }: { items: string[]; ctx: Ctx }) {
+function BulletList({ items, ctx }: { items: string[]; ctx: Ctx }) {
   if (!items.length) return null;
   const { styles, tkns, glyph, link } = ctx;
   return (
     <>
-      {items.map((b, i) => (
-        <View key={i} style={styles.bulletRow}>
-          <Text style={styles.bulletDot}>{glyph}</Text>
-          <InlineText text={b} style={styles.bulletText} tkns={tkns} linkBase={link} />
-        </View>
-      ))}
+      {items.map((b, i) => {
+        const layout = extractBlockLayout(b);
+        if (layout.mode === "split") {
+          return (
+            <View key={i} style={styles.bulletRow}>
+              <Text style={styles.bulletDot}>{glyph}</Text>
+              <View style={{ flex: 1, flexDirection: "row", alignItems: "baseline" }}>
+                <InlineText text={layout.left} style={{ ...styles.bulletText, flexGrow: 1, flexShrink: 1 }} tkns={tkns} linkBase={link} />
+                <InlineText text={layout.right} style={{ ...styles.bulletText, flexShrink: 0, textAlign: "right" }} tkns={tkns} linkBase={link} />
+              </View>
+            </View>
+          );
+        }
+        const { align, text } = layout.mode === "whole" ? layout : { align: null as null, text: layout.text };
+        const rowStyle = align ? { ...styles.bulletRow, justifyContent: alignToJustify(align) } : styles.bulletRow;
+        return (
+          <View key={i} style={rowStyle}>
+            <Text style={styles.bulletDot}>{glyph}</Text>
+            <InlineText text={text} style={styles.bulletText} tkns={tkns} linkBase={link} />
+          </View>
+        );
+      })}
     </>
   );
 }
 
-function Item({ item, ctx }: { item: ResumeAstItem; ctx: Ctx }) {
+function renderTextBlock(
+  text: string,
+  style: Record<string, string | number>,
+  ctx: Ctx,
+  keyIndex?: number
+) {
+  const layout = extractBlockLayout(text);
   const { styles, tkns, link } = ctx;
-  const titleText = item.title && item.subtitle
-    ? `${item.title} — ${item.subtitle}`
-    : item.title ?? item.subtitle ?? "";
-  const hasDates = !!item.dates;
-  const hasLocation = !!item.location;
+  if (layout.mode === "split") {
+    return (
+      <SplitRow
+        key={keyIndex}
+        left={layout.left}
+        right={layout.right}
+        style={style}
+        rightStyle={layout.tag === "dates" ? styles.dates : undefined}
+        tkns={tkns}
+        linkBase={link}
+      />
+    );
+  }
+  if (layout.mode === "whole") {
+    return (
+      <InlineText
+        key={keyIndex}
+        text={layout.text}
+        style={withAlign(style, layout.align)}
+        tkns={tkns}
+        linkBase={link}
+      />
+    );
+  }
   return (
-    <View style={{ marginTop: 4 }}>
-      <View style={styles.itemHeader}>
-        <InlineText text={titleText} style={styles.itemTitle} tkns={tkns} linkBase={link} />
-        {hasDates || hasLocation ? (
-          <View style={styles.itemMetaRow}>
-            {hasDates ? (
-              <InlineText text={item.dates!} style={styles.dates} tkns={tkns} linkBase={link} />
-            ) : null}
-            {hasDates && hasLocation ? (
-              <Text style={styles.metaSep}>·</Text>
-            ) : null}
-            {hasLocation ? (
-              <InlineText text={item.location!} style={styles.location} tkns={tkns} linkBase={link} />
-            ) : null}
-          </View>
-        ) : null}
-      </View>
-      {item.paragraphs?.map((p, i) => (
-        <InlineText key={`p-${i}`} text={p} style={styles.paragraph} tkns={tkns} linkBase={link} />
-      ))}
-      <Bullets items={item.bullets} ctx={ctx} />
-    </View>
+    <InlineText
+      key={keyIndex}
+      text={layout.text}
+      style={style}
+      tkns={tkns}
+      linkBase={link}
+    />
   );
 }
 
-function Section({ section, ctx }: { section: ResumeAstSection; ctx: Ctx }) {
-  const { styles, tkns, link } = ctx;
-  const hasContent =
-    section.items.length ||
-    section.paragraphs?.length ||
-    section.bullets?.length;
-  if (!hasContent) return null;
-  return (
-    <View>
-      <InlineText text={section.heading} style={styles.sectionHeading} tkns={tkns} linkBase={link} />
-      {section.paragraphs?.map((p, i) => (
-        <InlineText key={`p-${i}`} text={p} style={styles.paragraph} tkns={tkns} linkBase={link} />
-      ))}
-      {section.bullets?.length ? (
-        <Bullets items={section.bullets} ctx={ctx} />
-      ) : null}
-      {section.items.map((item, i) => (
-        <Item key={i} item={item} ctx={ctx} />
-      ))}
-    </View>
-  );
+function Block({ block, ctx }: { block: ResumeBlock; ctx: Ctx }) {
+  const { styles } = ctx;
+  if (block.kind === "heading") {
+    if (block.level === 1) return renderTextBlock(block.text, styles.name, ctx);
+    if (block.level === 2) return renderTextBlock(block.text, styles.sectionHeading, ctx);
+    if (block.level === 3) return renderTextBlock(block.text, styles.roleHeading, ctx);
+    return renderTextBlock(block.text, styles.subHeading, ctx);
+  }
+  if (block.kind === "paragraph") {
+    return renderTextBlock(block.text, styles.paragraph, ctx);
+  }
+  if (block.kind === "list") {
+    return <BulletList items={block.items} ctx={ctx} />;
+  }
+  if (block.kind === "contacts") {
+    return <ContactRow atoms={block.atoms} ctx={ctx} />;
+  }
+  return null;
 }
 
-export function ClassicTemplate({ ast, theme }: { ast: ResumeAst; theme: ResumeTheme }) {
+export function ClassicTemplate({ ast, theme }: { ast: ResumeDoc; theme: ResumeTheme }) {
   const { styles, t, glyph, link } = buildStyles(theme);
   const ctx: Ctx = { styles, tkns: t, glyph, link };
   if (isAstEmpty(ast)) {
@@ -253,11 +261,8 @@ export function ClassicTemplate({ ast, theme }: { ast: ResumeAst; theme: ResumeT
   return (
     <Document>
       <Page size="LETTER" style={styles.page}>
-        <Header ast={ast} ctx={ctx} />
-        {ast.sections.map((section, i) => (
-          <React.Fragment key={`${section.key}-${i}`}>
-            <Section section={section} ctx={ctx} />
-          </React.Fragment>
+        {ast.blocks.map((block, i) => (
+          <Block key={i} block={block} ctx={ctx} />
         ))}
       </Page>
     </Document>
