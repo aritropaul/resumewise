@@ -3,8 +3,9 @@ import type { NextConfig } from "next";
 const nextConfig: NextConfig = {
   turbopack: {},
   allowedDevOrigins: ["resumewise.lcl"],
-  // pdf2json reads files + uses Node APIs — keep it out of the bundle.
-  serverExternalPackages: ["pdf2json", "better-sqlite3"],
+  // better-sqlite3 uses native bindings — keep out of bundle for local dev.
+  // On Cloudflare, the D1 backend is used instead (no native modules).
+  serverExternalPackages: ["better-sqlite3"],
   webpack: (config) => {
     config.resolve.alias.canvas = false;
     return config;

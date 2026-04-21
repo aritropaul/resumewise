@@ -10,7 +10,11 @@
     "test:md": "tsx scripts/test-resume-md.ts",
     "test:inline": "tsx scripts/test-resume-inline.ts",
     "test:edits": "tsx scripts/test-resume-md-edits.ts",
-    "test:smoke": "npm run test:md && npm run test:inline && npm run test:edits"
+    "test:smoke": "npm run test:md && npm run test:inline && npm run test:edits",
+    "cf:build": "opennextjs-cloudflare",
+    "cf:preview": "opennextjs-cloudflare && wrangler pages dev .worker.next",
+    "cf:deploy": "opennextjs-cloudflare && wrangler pages deploy .worker.next",
+    "d1:migrate": "wrangler d1 migrations apply resumewise-prod"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.80.0",
@@ -29,7 +33,6 @@
     "next": "^16.2.3",
     "openai": "^6.32.0",
     "pdf-lib": "^1.17.1",
-    "pdf2json": "^4.0.2",
     "pdfjs-dist": "^5.4.296",
     "react": "^19.2.5",
     "react-colorful": "^5.6.1",
@@ -45,6 +48,8 @@
     "zustand": "^5.0.12"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260421.1",
+    "@opennextjs/cloudflare": "^1.19.3",
     "@tailwindcss/postcss": "^4",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^20",
@@ -54,6 +59,7 @@
     "eslint-config-next": "16.2.1",
     "tailwindcss": "^4",
     "tsx": "^4.21.0",
-    "typescript": "^5"
+    "typescript": "^5",
+    "wrangler": "^4.84.1"
   }
 }

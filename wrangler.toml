@@ -1,0 +1,11 @@
+name = "resumewise"
+compatibility_date = "2025-04-01"
+compatibility_flags = ["nodejs_compat"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "resumewise-prod"
+database_id = "placeholder-fill-after-d1-create"
+
+[vars]
+ENVIRONMENT = "production"

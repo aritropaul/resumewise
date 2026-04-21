@@ -33,7 +33,6 @@ import {
   duplicateDocument,
   createVariantDocument,
   createBlankDocument,
-  migrateFromIndexedDB,
   isVariantDocument,
   type SavedDocument,
 } from "@/lib/storage";
@@ -143,12 +142,6 @@ export default function Home() {
     (async () => {
       setLoadingDocs(true);
       try {
-        // Migrate any leftover IndexedDB data into server DB
-        const migrated = await migrateFromIndexedDB();
-        if (migrated > 0) {
-          toast.success(`migrated ${migrated} document${migrated === 1 ? "" : "s"} from browser storage`);
-        }
-
         const all = await loadAllDocuments();
         all.sort((a, b) => a.name.localeCompare(b.name));
         setFiles(all);
@@ -300,7 +293,7 @@ export default function Home() {
         fd.append("file", file);
         const parseRes = await fetch("/api/parse", { method: "POST", body: fd });
         if (!parseRes.ok) {
-          const err = await parseRes.json().catch(() => ({ error: "parse failed" }));
+          const err = await parseRes.json().catch(() => ({ error: "parse failed" })) as { error?: string };
           throw new Error(err.error || "parse failed");
         }
         const { text } = (await parseRes.json()) as { text: string };
@@ -311,7 +304,7 @@ export default function Home() {
           body: JSON.stringify({ apiKey: getApiKey() || undefined, text }),
         });
         if (!importRes.ok) {
-          const err = await importRes.json().catch(() => ({ error: "import failed" }));
+          const err = await importRes.json().catch(() => ({ error: "import failed" })) as { error?: string };
           throw new Error(err.error || "import failed");
         }
         const { markdown: importedMd } = (await importRes.json()) as {

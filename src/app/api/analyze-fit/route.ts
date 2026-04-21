@@ -3,9 +3,7 @@
 // whole payload at once.
 
 import { NextRequest } from "next/server";
-import Anthropic from "@anthropic-ai/sdk";
-import OpenAI from "openai";
-import type { Provider } from "@/lib/ai";
+import { getProviderClient, resolveApiKey } from "@/lib/providers";
 
 interface AnalyzeFitRequestBody {
   apiKey?: string;
@@ -29,28 +27,6 @@ export interface AnalyzeFitResult {
     reason: string;
   }>;
 }
-
-function detectProvider(key: string): Provider {
-  if (key.startsWith("sk-ant-")) return "anthropic";
-  if (key.startsWith("sk-or-")) return "openrouter";
-  if (key.startsWith("xai-")) return "grok";
-  if (key.startsWith("AIzaSy")) return "gemini";
-  return "openai";
-}
-
-const PROVIDER_MODELS: Record<Provider, string> = {
-  anthropic: "claude-sonnet-4-6-20250627",
-  openai: "gpt-5.4",
-  gemini: "gemini-3.1-pro-preview",
-  grok: "grok-4-1-fast-reasoning",
-  openrouter: "anthropic/claude-sonnet-4.6",
-};
-
-const OPENAI_COMPATIBLE_BASES: Record<string, string> = {
-  grok: "https://api.x.ai/v1",
-  openrouter: "https://openrouter.ai/api/v1",
-  gemini: "https://generativelanguage.googleapis.com/v1beta/openai",
-};
 
 const SYSTEM_PROMPT = `You are an impartial resume reviewer and ATS simulator. Given a resume (markdown) and a target job description, compute a structured analysis.
 
@@ -120,23 +96,19 @@ export async function POST(req: NextRequest) {
     return Response.json({ error: "jobDescription required" }, { status: 400 });
   }
 
-  const apiKey =
-    (typeof body.apiKey === "string" && body.apiKey) ||
-    process.env.OPENAI_API_KEY;
+  const apiKey = resolveApiKey(body.apiKey);
   if (!apiKey) {
     return Response.json({ error: "API key required" }, { status: 401 });
   }
 
-  const provider = detectProvider(apiKey);
-  const model = PROVIDER_MODELS[provider];
+  const client = getProviderClient(apiKey);
   const userPrompt = buildUserPrompt(body.markdown, body.jobDescription);
 
   try {
     let raw: string;
-    if (provider === "anthropic") {
-      const client = new Anthropic({ apiKey });
-      const msg = await client.messages.create({
-        model,
+    if (client.provider === "anthropic") {
+      const msg = await client.anthropic.messages.create({
+        model: client.model,
         max_tokens: 4000,
         temperature: 0.2,
         system: SYSTEM_PROMPT,
@@ -150,10 +122,8 @@ export async function POST(req: NextRequest) {
       const text = block && block.type === "text" ? block.text : "";
       raw = `{${text}`;
     } else {
-      const baseURL = OPENAI_COMPATIBLE_BASES[provider];
-      const client = new OpenAI({ apiKey, ...(baseURL ? { baseURL } : {}) });
-      const completion = await client.chat.completions.create({
-        model,
+      const completion = await client.openai.chat.completions.create({
+        model: client.model,
         max_completion_tokens: 4000,
         temperature: 0.2,
         // gemini's OpenAI-compatible endpoint ignores this; harmless.

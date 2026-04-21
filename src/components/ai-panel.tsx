@@ -142,7 +142,7 @@ export function AiPanel({
       });
 
       if (!res.ok || !res.body) {
-        const err = await res.json().catch(() => ({ error: "request failed" }));
+        const err = await res.json().catch(() => ({ error: "request failed" })) as { error?: string };
         throw new Error(err.error || `request failed (${res.status})`);
       }
 

@@ -1,47 +1,9 @@
-import Database from "better-sqlite3";
-import path from "node:path";
-import os from "node:os";
-import fs from "node:fs";
-
-const DATA_DIR = path.join(os.homedir(), ".resumewise");
-const DB_PATH = path.join(DATA_DIR, "resumewise.db");
-
-let _db: Database.Database | null = null;
-
-function getDb(): Database.Database {
-  if (_db) return _db;
-
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-
-  _db = new Database(DB_PATH);
-  _db.pragma("journal_mode = WAL");
-  _db.pragma("foreign_keys = ON");
-
-  _db.exec(`
-    CREATE TABLE IF NOT EXISTS documents (
-      id TEXT PRIMARY KEY,
-      name TEXT NOT NULL,
-      date TEXT NOT NULL,
-      markdown TEXT NOT NULL DEFAULT '',
-      theme TEXT NOT NULL DEFAULT '{}',
-      template TEXT NOT NULL DEFAULT 'classic',
-      parentId TEXT,
-      sourceId TEXT,
-      baseId TEXT,
-      jobDescription TEXT,
-      jobKey TEXT,
-      jobTitle TEXT,
-      company TEXT,
-      jobSourceUrl TEXT,
-      jobSource TEXT,
-      jobSummary TEXT,
-      collapsed INTEGER DEFAULT 0,
-      documentType TEXT DEFAULT 'resume'
-    )
-  `);
-
-  return _db;
-}
+// Storage abstraction — dual backend.
+// Local dev: better-sqlite3 at ~/.resumewise/resumewise.db
+// Cloudflare: D1 binding via @opennextjs/cloudflare
+//
+// All methods are async. The sqlite backend wraps sync calls in promises
+// so the interface is uniform.
 
 export interface DocRow {
   id: string;
@@ -64,7 +26,30 @@ export interface DocRow {
   documentType: string | null;
 }
 
-function rowToDoc(row: DocRow) {
+export interface SavedDoc {
+  id: string;
+  name: string;
+  date: string;
+  markdown: string;
+  theme: Record<string, unknown>;
+  template: string;
+  parentId?: string | null;
+  sourceId?: string | null;
+  baseId?: string | null;
+  jobDescription?: string | null;
+  jobKey?: string | null;
+  jobTitle?: string | null;
+  company?: string | null;
+  jobSourceUrl?: string | null;
+  jobSource?: string | null;
+  jobSummary?: unknown;
+  collapsed?: boolean;
+  documentType?: string | null;
+}
+
+// ---------- shared helpers ----------
+
+function rowToDoc(row: DocRow): SavedDoc {
   return {
     id: row.id,
     name: row.name,
@@ -87,54 +72,189 @@ function rowToDoc(row: DocRow) {
   };
 }
 
-export function loadAll() {
-  const db = getDb();
-  const rows = db.prepare("SELECT * FROM documents").all() as DocRow[];
-  return rows.map(rowToDoc);
-}
-
-export function upsert(doc: Record<string, unknown>) {
-  const db = getDb();
-  db.prepare(`
-    INSERT INTO documents (id, name, date, markdown, theme, template, parentId, sourceId, baseId, jobDescription, jobKey, jobTitle, company, jobSourceUrl, jobSource, jobSummary, collapsed, documentType)
-    VALUES (@id, @name, @date, @markdown, @theme, @template, @parentId, @sourceId, @baseId, @jobDescription, @jobKey, @jobTitle, @company, @jobSourceUrl, @jobSource, @jobSummary, @collapsed, @documentType)
-    ON CONFLICT(id) DO UPDATE SET
-      name=@name, date=@date, markdown=@markdown, theme=@theme, template=@template,
-      parentId=@parentId, sourceId=@sourceId, baseId=@baseId,
-      jobDescription=@jobDescription, jobKey=@jobKey, jobTitle=@jobTitle,
-      company=@company, jobSourceUrl=@jobSourceUrl, jobSource=@jobSource,
-      jobSummary=@jobSummary, collapsed=@collapsed, documentType=@documentType
-  `).run({
-    id: doc.id,
-    name: doc.name,
-    date: doc.date,
-    markdown: doc.markdown || "",
+function docToParams(doc: Record<string, unknown>, userId: string) {
+  return {
+    id: doc.id as string,
+    user_id: userId,
+    name: doc.name as string,
+    date: doc.date as string,
+    markdown: (doc.markdown as string) || "",
     theme: JSON.stringify(doc.theme || {}),
-    template: doc.template || "classic",
-    parentId: doc.parentId || null,
-    sourceId: doc.sourceId || null,
-    baseId: doc.baseId || null,
-    jobDescription: doc.jobDescription || null,
-    jobKey: doc.jobKey || null,
-    jobTitle: doc.jobTitle || null,
-    company: doc.company || null,
-    jobSourceUrl: doc.jobSourceUrl || null,
-    jobSource: doc.jobSource || null,
+    template: (doc.template as string) || "classic",
+    parentId: (doc.parentId as string) || null,
+    sourceId: (doc.sourceId as string) || null,
+    baseId: (doc.baseId as string) || null,
+    jobDescription: (doc.jobDescription as string) || null,
+    jobKey: (doc.jobKey as string) || null,
+    jobTitle: (doc.jobTitle as string) || null,
+    company: (doc.company as string) || null,
+    jobSourceUrl: (doc.jobSourceUrl as string) || null,
+    jobSource: (doc.jobSource as string) || null,
     jobSummary: doc.jobSummary ? JSON.stringify(doc.jobSummary) : null,
     collapsed: doc.collapsed ? 1 : 0,
-    documentType: doc.documentType || "resume",
-  });
+    documentType: (doc.documentType as string) || "resume",
+  };
 }
 
-export function upsertMany(docs: Record<string, unknown>[]) {
-  const db = getDb();
-  const tx = db.transaction(() => {
-    for (const doc of docs) upsert(doc);
-  });
-  tx();
+const UPSERT_SQL = `
+  INSERT INTO documents (id, user_id, name, date, markdown, theme, template, parentId, sourceId, baseId, jobDescription, jobKey, jobTitle, company, jobSourceUrl, jobSource, jobSummary, collapsed, documentType)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT(id) DO UPDATE SET
+    name=excluded.name, date=excluded.date, markdown=excluded.markdown,
+    theme=excluded.theme, template=excluded.template, parentId=excluded.parentId,
+    sourceId=excluded.sourceId, baseId=excluded.baseId,
+    jobDescription=excluded.jobDescription, jobKey=excluded.jobKey,
+    jobTitle=excluded.jobTitle, company=excluded.company,
+    jobSourceUrl=excluded.jobSourceUrl, jobSource=excluded.jobSource,
+    jobSummary=excluded.jobSummary, collapsed=excluded.collapsed,
+    documentType=excluded.documentType`;
+
+function paramValues(p: ReturnType<typeof docToParams>) {
+  return [
+    p.id, p.user_id, p.name, p.date, p.markdown, p.theme, p.template,
+    p.parentId, p.sourceId, p.baseId, p.jobDescription, p.jobKey,
+    p.jobTitle, p.company, p.jobSourceUrl, p.jobSource, p.jobSummary,
+    p.collapsed, p.documentType,
+  ];
 }
 
-export function remove(id: string) {
-  const db = getDb();
-  db.prepare("DELETE FROM documents WHERE id = ?").run(id);
+// ---------- interface ----------
+
+export interface StorageBackend {
+  loadAll(userId: string): Promise<SavedDoc[]>;
+  upsert(userId: string, doc: Record<string, unknown>): Promise<void>;
+  upsertMany(userId: string, docs: Record<string, unknown>[]): Promise<void>;
+  remove(userId: string, id: string): Promise<void>;
+}
+
+// ---------- better-sqlite3 backend (local dev) ----------
+
+let _sqliteBackend: StorageBackend | null = null;
+
+function getSqliteBackend(): StorageBackend {
+  if (_sqliteBackend) return _sqliteBackend;
+
+  // Dynamic import to avoid loading native module on Cloudflare
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const Database = require("better-sqlite3");
+  const path = require("node:path");
+  const os = require("node:os");
+  const fs = require("node:fs");
+
+  const DATA_DIR = path.join(os.homedir(), ".resumewise");
+  const DB_PATH = path.join(DATA_DIR, "resumewise.db");
+
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  const db = new Database(DB_PATH);
+  db.pragma("journal_mode = WAL");
+  db.pragma("foreign_keys = ON");
+
+  // Local dev schema — no user_id column (single user).
+  // Also create the user_id version for forward compat.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS documents (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL DEFAULT 'local',
+      name TEXT NOT NULL,
+      date TEXT NOT NULL,
+      markdown TEXT NOT NULL DEFAULT '',
+      theme TEXT NOT NULL DEFAULT '{}',
+      template TEXT NOT NULL DEFAULT 'classic',
+      parentId TEXT,
+      sourceId TEXT,
+      baseId TEXT,
+      jobDescription TEXT,
+      jobKey TEXT,
+      jobTitle TEXT,
+      company TEXT,
+      jobSourceUrl TEXT,
+      jobSource TEXT,
+      jobSummary TEXT,
+      collapsed INTEGER DEFAULT 0,
+      documentType TEXT DEFAULT 'resume'
+    )
+  `);
+
+  // Add user_id column if migrating from old schema
+  try {
+    db.exec("ALTER TABLE documents ADD COLUMN user_id TEXT NOT NULL DEFAULT 'local'");
+  } catch {
+    // Column already exists — fine
+  }
+
+  _sqliteBackend = {
+    async loadAll(userId: string) {
+      const rows = db
+        .prepare("SELECT * FROM documents WHERE user_id = ?")
+        .all(userId) as DocRow[];
+      return rows.map(rowToDoc);
+    },
+    async upsert(userId: string, doc: Record<string, unknown>) {
+      const p = docToParams(doc, userId);
+      db.prepare(UPSERT_SQL).run(...paramValues(p));
+    },
+    async upsertMany(userId: string, docs: Record<string, unknown>[]) {
+      const tx = db.transaction(() => {
+        for (const doc of docs) {
+          const p = docToParams(doc, userId);
+          db.prepare(UPSERT_SQL).run(...paramValues(p));
+        }
+      });
+      tx();
+    },
+    async remove(userId: string, id: string) {
+      db.prepare("DELETE FROM documents WHERE id = ? AND user_id = ?").run(id, userId);
+    },
+  };
+
+  return _sqliteBackend;
+}
+
+// ---------- D1 backend (Cloudflare) ----------
+
+function getD1Backend(db: D1Database): StorageBackend {
+  return {
+    async loadAll(userId: string) {
+      const { results } = await db
+        .prepare("SELECT * FROM documents WHERE user_id = ?")
+        .bind(userId)
+        .all<DocRow>();
+      return (results ?? []).map(rowToDoc);
+    },
+    async upsert(userId: string, doc: Record<string, unknown>) {
+      const p = docToParams(doc, userId);
+      await db.prepare(UPSERT_SQL).bind(...paramValues(p)).run();
+    },
+    async upsertMany(userId: string, docs: Record<string, unknown>[]) {
+      const stmts = docs.map((doc) => {
+        const p = docToParams(doc, userId);
+        return db.prepare(UPSERT_SQL).bind(...paramValues(p));
+      });
+      await db.batch(stmts);
+    },
+    async remove(userId: string, id: string) {
+      await db
+        .prepare("DELETE FROM documents WHERE id = ? AND user_id = ?")
+        .bind(id, userId)
+        .run();
+    },
+  };
+}
+
+// ---------- backend resolution ----------
+
+export async function getStorage(): Promise<StorageBackend> {
+  // Try Cloudflare D1 first
+  try {
+    const { getCloudflareContext } = await import("@opennextjs/cloudflare");
+    const { env } = await getCloudflareContext();
+    if (env?.DB) {
+      return getD1Backend(env.DB as D1Database);
+    }
+  } catch {
+    // Not on Cloudflare — fall through to sqlite
+  }
+
+  // Local dev: better-sqlite3
+  return getSqliteBackend();
 }

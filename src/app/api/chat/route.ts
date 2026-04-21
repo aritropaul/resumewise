@@ -4,9 +4,7 @@
 // against the original and presents hunk-level accept/reject UI.
 
 import { NextRequest } from "next/server";
-import Anthropic from "@anthropic-ai/sdk";
-import OpenAI from "openai";
-import type { Provider } from "@/lib/ai";
+import { getProviderClient, resolveApiKey } from "@/lib/providers";
 
 interface ChatMessage {
   role: "user" | "assistant";
@@ -24,28 +22,6 @@ interface ChatRequestBody {
   selection?: string;
   instruction?: string;
 }
-
-function detectProvider(key: string): Provider {
-  if (key.startsWith("sk-ant-")) return "anthropic";
-  if (key.startsWith("sk-or-")) return "openrouter";
-  if (key.startsWith("xai-")) return "grok";
-  if (key.startsWith("AIzaSy")) return "gemini";
-  return "openai";
-}
-
-const PROVIDER_MODELS: Record<Provider, string> = {
-  anthropic: "claude-sonnet-4-6-20250627",
-  openai: "gpt-5.4",
-  gemini: "gemini-3.1-pro-preview",
-  grok: "grok-4-1-fast-reasoning",
-  openrouter: "anthropic/claude-sonnet-4.6",
-};
-
-const OPENAI_COMPATIBLE_BASES: Record<string, string> = {
-  grok: "https://api.x.ai/v1",
-  openrouter: "https://openrouter.ai/api/v1",
-  gemini: "https://generativelanguage.googleapis.com/v1beta/openai",
-};
 
 // Humanizer rules. These constrain the model away from the cliches that make
 // LLM-written resumes obvious. Keep verbatim across prompt modes.
@@ -166,8 +142,7 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const apiKey: string | undefined =
-    (typeof body.apiKey === "string" && body.apiKey) || process.env.OPENAI_API_KEY;
+  const apiKey = resolveApiKey(body.apiKey);
   if (!apiKey) {
     return new Response(JSON.stringify({ error: "API key required" }), {
       status: 401,
@@ -175,8 +150,7 @@ export async function POST(req: NextRequest) {
     });
   }
 
-  const provider = detectProvider(apiKey);
-  const model = PROVIDER_MODELS[provider];
+  const client = getProviderClient(apiKey);
   const system = buildSystemPrompt(body.mode);
 
   let userMessages: ChatMessage[];
@@ -215,10 +189,9 @@ export async function POST(req: NextRequest) {
       };
 
       try {
-        if (provider === "anthropic") {
-          const client = new Anthropic({ apiKey });
-          const s = await client.messages.stream({
-            model,
+        if (client.provider === "anthropic") {
+          const s = await client.anthropic.messages.stream({
+            model: client.model,
             max_tokens: 8000,
             system,
             messages: userMessages,
@@ -233,10 +206,8 @@ export async function POST(req: NextRequest) {
           }
           send("done", {});
         } else {
-          const baseURL = OPENAI_COMPATIBLE_BASES[provider];
-          const client = new OpenAI({ apiKey, ...(baseURL ? { baseURL } : {}) });
-          const s = await client.chat.completions.create({
-            model,
+          const s = await client.openai.chat.completions.create({
+            model: client.model,
             max_completion_tokens: 8000,
             stream: true,
             messages: [

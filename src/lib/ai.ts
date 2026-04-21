@@ -31,7 +31,7 @@ export function checkServerKey(): Promise<boolean> {
   if (!serverKeyPromise) {
     serverKeyPromise = fetch("/api/has-key")
       .then((r) => (r.ok ? r.json() : { available: false }))
-      .then((j) => !!j.available)
+      .then((j) => !!(j as { available?: boolean }).available)
       .catch(() => false);
   }
   return serverKeyPromise;

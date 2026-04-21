@@ -72,70 +72,7 @@ export async function deleteDocument(id: string): Promise<void> {
   if (!res.ok) throw new Error("Failed to delete document");
 }
 
-// ---------------------------------------------------------------------------
-// Migrate any leftover IndexedDB data into the server DB (runs once)
-// ---------------------------------------------------------------------------
-
-const IDB_NAME = "resumewise";
-const IDB_STORE = "documents";
-
-export async function migrateFromIndexedDB(): Promise<number> {
-  if (typeof window === "undefined" || !window.indexedDB) return 0;
-
-  try {
-    // Check if IDB exists without triggering upgrade
-    const dbs = await indexedDB.databases();
-    if (!dbs.some((d) => d.name === IDB_NAME)) return 0;
-
-    const db: IDBDatabase = await new Promise((resolve, reject) => {
-      const req = indexedDB.open(IDB_NAME);
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error);
-    });
-
-    if (!db.objectStoreNames.contains(IDB_STORE)) {
-      db.close();
-      return 0;
-    }
-
-    const docs: SavedDocument[] = await new Promise((resolve, reject) => {
-      const tx = db.transaction(IDB_STORE, "readonly");
-      const store = tx.objectStore(IDB_STORE);
-      const req = store.getAll();
-      req.onsuccess = () => resolve(req.result || []);
-      req.onerror = () => reject(req.error);
-    });
-
-    db.close();
-
-    if (docs.length === 0) return 0;
-
-    // Bulk-upload to server
-    const res = await fetch("/api/documents", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(docs),
-    });
-    if (!res.ok) return 0;
-
-    // Clear IDB after successful migration
-    const db2: IDBDatabase = await new Promise((resolve, reject) => {
-      const req = indexedDB.open(IDB_NAME);
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error);
-    });
-    await new Promise<void>((resolve) => {
-      const tx = db2.transaction(IDB_STORE, "readwrite");
-      tx.objectStore(IDB_STORE).clear();
-      tx.oncomplete = () => resolve();
-    });
-    db2.close();
-
-    return docs.length;
-  } catch {
-    return 0;
-  }
-}
+// IndexedDB migration removed — server storage handles persistence.
 
 // ---------------------------------------------------------------------------
 // Pure document factories (no storage calls)
@@ -218,7 +155,3 @@ export function createSampleDocument(name: string): SavedDocument {
   };
 }
 
-// Legacy compat — no longer needed with server storage
-export function consumeDroppedLegacyCount(): number {
-  return 0;
-}

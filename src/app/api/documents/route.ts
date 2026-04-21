@@ -1,9 +1,13 @@
 import { NextResponse } from "next/server";
-import { loadAll, upsert, upsertMany, remove } from "@/lib/server-storage";
+import { getStorage } from "@/lib/server-storage";
+
+// Until auth lands (Phase 3), all local dev uses "local" as userId.
+const USER_ID = "local";
 
 export async function GET() {
   try {
-    return NextResponse.json(loadAll());
+    const storage = await getStorage();
+    return NextResponse.json(await storage.loadAll(USER_ID));
   } catch (e) {
     return NextResponse.json({ error: String(e) }, { status: 500 });
   }
@@ -11,16 +15,15 @@ export async function GET() {
 
 export async function POST(req: Request) {
   try {
-    const body = await req.json();
+    const storage = await getStorage();
+    const body = await req.json() as Record<string, unknown> | Record<string, unknown>[];
 
-    // Bulk import: array of docs
     if (Array.isArray(body)) {
-      upsertMany(body);
+      await storage.upsertMany(USER_ID, body);
       return NextResponse.json({ ok: true, count: body.length });
     }
 
-    // Single upsert
-    upsert(body);
+    await storage.upsert(USER_ID, body);
     return NextResponse.json({ ok: true });
   } catch (e) {
     return NextResponse.json({ error: String(e) }, { status: 500 });
@@ -29,12 +32,13 @@ export async function POST(req: Request) {
 
 export async function DELETE(req: Request) {
   try {
+    const storage = await getStorage();
     const { searchParams } = new URL(req.url);
     const id = searchParams.get("id");
     if (!id) {
       return NextResponse.json({ error: "missing id" }, { status: 400 });
     }
-    remove(id);
+    await storage.remove(USER_ID, id);
     return NextResponse.json({ ok: true });
   } catch (e) {
     return NextResponse.json({ error: String(e) }, { status: 500 });

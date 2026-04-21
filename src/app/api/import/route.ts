@@ -2,31 +2,7 @@
 // Non-streaming: blocks until the LLM finishes. Returns { markdown }.
 
 import { NextRequest, NextResponse } from "next/server";
-import Anthropic from "@anthropic-ai/sdk";
-import OpenAI from "openai";
-import type { Provider } from "@/lib/ai";
-
-function detectProvider(key: string): Provider {
-  if (key.startsWith("sk-ant-")) return "anthropic";
-  if (key.startsWith("sk-or-")) return "openrouter";
-  if (key.startsWith("xai-")) return "grok";
-  if (key.startsWith("AIzaSy")) return "gemini";
-  return "openai";
-}
-
-const PROVIDER_MODELS: Record<Provider, string> = {
-  anthropic: "claude-sonnet-4-6-20250627",
-  openai: "gpt-5.4",
-  gemini: "gemini-3.1-pro-preview",
-  grok: "grok-4-1-fast-reasoning",
-  openrouter: "anthropic/claude-sonnet-4.6",
-};
-
-const OPENAI_COMPATIBLE_BASES: Record<string, string> = {
-  grok: "https://api.x.ai/v1",
-  openrouter: "https://openrouter.ai/api/v1",
-  gemini: "https://generativelanguage.googleapis.com/v1beta/openai",
-};
+import { getProviderClient, resolveApiKey } from "@/lib/providers";
 
 const SYSTEM = `You are a resume importer. Convert raw resume text into a single structured markdown document following this exact convention:
 
@@ -90,20 +66,16 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "No text provided" }, { status: 400 });
     }
 
-    const apiKey: string | undefined =
-      (typeof userKey === "string" && userKey) || process.env.OPENAI_API_KEY;
+    const apiKey = resolveApiKey(userKey);
     if (!apiKey) return NextResponse.json({ error: "API key required" }, { status: 401 });
 
-    const provider = detectProvider(apiKey);
-    const model = PROVIDER_MODELS[provider];
-
+    const client = getProviderClient(apiKey);
     const userMsg = `Resume text:\n\n${text.slice(0, 20000)}`;
 
     let raw = "";
-    if (provider === "anthropic") {
-      const client = new Anthropic({ apiKey });
-      const res = await client.messages.create({
-        model,
+    if (client.provider === "anthropic") {
+      const res = await client.anthropic.messages.create({
+        model: client.model,
         max_tokens: 8000,
         system: SYSTEM,
         messages: [{ role: "user", content: userMsg }],
@@ -112,10 +84,8 @@ export async function POST(req: NextRequest) {
         .map((contentBlock) => (contentBlock.type === "text" ? contentBlock.text : ""))
         .join("");
     } else {
-      const baseURL = OPENAI_COMPATIBLE_BASES[provider];
-      const client = new OpenAI({ apiKey, ...(baseURL ? { baseURL } : {}) });
-      const res = await client.chat.completions.create({
-        model,
+      const res = await client.openai.chat.completions.create({
+        model: client.model,
         max_completion_tokens: 8000,
         messages: [
           { role: "system", content: SYSTEM },
