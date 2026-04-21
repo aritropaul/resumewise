@@ -14,8 +14,26 @@ const instrumentSerif = Instrument_Serif({
 });
 
 export const metadata: Metadata = {
-  title: "ResumeWise",
-  description: "local-first resume editor with ai assistance",
+  title: {
+    default: "ResumeWise",
+    template: "%s | ResumeWise",
+  },
+  description: "AI-powered resume editor. Tailored resumes for every application.",
+  openGraph: {
+    title: "ResumeWise",
+    description: "AI-powered resume editor. Tailored resumes for every application.",
+    type: "website",
+    siteName: "ResumeWise",
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "ResumeWise",
+    description: "AI-powered resume editor. Tailored resumes for every application.",
+  },
+  robots: {
+    index: true,
+    follow: true,
+  },
 };
 
 const themeInit = `(function(){try{var t=localStorage.getItem("theme");var m=window.matchMedia("(prefers-color-scheme: dark)").matches;if(t==="dark"||(t!=="light"&&m)){document.documentElement.classList.add("dark")}}catch(e){}})();`;
