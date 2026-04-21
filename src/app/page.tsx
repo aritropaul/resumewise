@@ -33,7 +33,7 @@ import {
   duplicateDocument,
   createVariantDocument,
   createBlankDocument,
-  consumeDroppedLegacyCount,
+  migrateFromIndexedDB,
   isVariantDocument,
   type SavedDocument,
 } from "@/lib/storage";
@@ -143,6 +143,12 @@ export default function Home() {
     (async () => {
       setLoadingDocs(true);
       try {
+        // Migrate any leftover IndexedDB data into server DB
+        const migrated = await migrateFromIndexedDB();
+        if (migrated > 0) {
+          toast.success(`migrated ${migrated} document${migrated === 1 ? "" : "s"} from browser storage`);
+        }
+
         const all = await loadAllDocuments();
         all.sort((a, b) => a.name.localeCompare(b.name));
         setFiles(all);
@@ -153,16 +159,6 @@ export default function Home() {
             theme: first.theme,
             template: first.template,
           });
-        }
-        const dropped = consumeDroppedLegacyCount();
-        if (dropped > 0) {
-          toast.message(
-            `cleared ${dropped} saved resume${dropped === 1 ? "" : "s"}`,
-            {
-              description:
-                "saved resumes from the prior version were dropped. re-import your pdf to use the new editor.",
-            }
-          );
         }
       } catch (e) {
         console.error("Failed to load documents", e);
@@ -335,6 +331,39 @@ export default function Home() {
     },
     [activateDoc]
   );
+
+  const handleImportBackup = useCallback(() => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".json";
+    input.onchange = async () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      const importToast = toast.loading("importing backup…");
+      try {
+        const text = await file.text();
+        const docs: SavedDocument[] = JSON.parse(text);
+        if (!Array.isArray(docs) || docs.length === 0) {
+          toast.error("no documents found in file", { id: importToast });
+          return;
+        }
+        const res = await fetch("/api/documents", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(docs),
+        });
+        if (!res.ok) throw new Error("upload failed");
+        const all = await loadAllDocuments();
+        all.sort((a, b) => a.name.localeCompare(b.name));
+        setFiles(all);
+        if (all.length > 0) activateDoc(all[0]);
+        toast.success(`imported ${docs.length} document${docs.length === 1 ? "" : "s"}`, { id: importToast });
+      } catch (e) {
+        toast.error(`import failed: ${(e as Error).message}`, { id: importToast });
+      }
+    };
+    input.click();
+  }, [activateDoc]);
 
   const handleRename = useCallback((id: string, name: string) => {
     setFiles((prev) =>
@@ -911,6 +940,7 @@ export default function Home() {
               loading={loadingDocs}
               onCreate={handleCreateBlank}
               onUpload={handleUpload}
+              onImportBackup={handleImportBackup}
             />
           )}
         </main>
@@ -1081,10 +1111,12 @@ function EmptyState({
   loading,
   onCreate,
   onUpload,
+  onImportBackup,
 }: {
   loading: boolean;
   onCreate: () => void;
   onUpload: () => void;
+  onImportBackup: () => void;
 }) {
   return (
     <div className="flex-1 flex items-center justify-center p-6 bg-background">
@@ -1124,9 +1156,15 @@ function EmptyState({
             </Badge>
           </Button>
         </div>
-        <div className="pt-4 border-t border-border flex items-center gap-2 text-[11px] text-muted-foreground">
-          <FileText weight="light" className="size-3.5" />
-          <span>press <Kbd>?</Kbd> for keyboard shortcuts</span>
+        <div className="pt-4 border-t border-border flex flex-col gap-3">
+          <Button size="sm" variant="outline" onClick={onImportBackup} disabled={loading}>
+            <DownloadSimple weight="light" className="size-3.5" />
+            import backup (.json)
+          </Button>
+          <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+            <FileText weight="light" className="size-3.5" />
+            <span>press <Kbd>?</Kbd> for keyboard shortcuts</span>
+          </div>
         </div>
       </div>
     </div>

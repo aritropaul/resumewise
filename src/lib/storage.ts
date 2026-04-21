@@ -9,13 +9,6 @@ export interface JobSummary {
   compensation: string | null;
 }
 
-const DB_NAME = "resumewise";
-// v4: markdown-canonical redesign. Content now lives in a single markdown
-// string per document; the legacy `resume: Resume` shape is dropped.
-const DB_VERSION = 4;
-const STORE_NAME = "documents";
-const LEGACY_FLAG_KEY = "rw-legacy-cleared-v4";
-
 export interface SavedDocument {
   id: string;
   name: string;
@@ -37,8 +30,6 @@ export interface SavedDocument {
   documentType?: "resume" | "cover_letter";
 }
 
-let droppedLegacyCount = 0;
-
 function stampedDate(): string {
   return new Date().toLocaleDateString("en-US", {
     year: "numeric",
@@ -55,69 +46,100 @@ export function isVariantDocument(doc: SavedDocument): boolean {
   return !!getBaseDocumentId(doc);
 }
 
-function openDB(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = (event) => {
-      const db = req.result;
-      if (!db.objectStoreNames.contains(STORE_NAME)) {
-        db.createObjectStore(STORE_NAME, { keyPath: "id" });
-        return;
-      }
-      // v<4: markdown redesign. Drop everything; user re-imports.
-      if (event.oldVersion < 4) {
-        const tx = req.transaction!;
-        const store = tx.objectStore(STORE_NAME);
-        const count = store.count();
-        count.onsuccess = () => {
-          droppedLegacyCount = count.result || 0;
-          store.clear();
-        };
-      }
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
-}
+// ---------------------------------------------------------------------------
+// Server-backed storage (SQLite via /api/documents)
+// ---------------------------------------------------------------------------
 
 export async function loadAllDocuments(): Promise<SavedDocument[]> {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_NAME, "readonly");
-    const store = tx.objectStore(STORE_NAME);
-    const req = store.getAll();
-    req.onsuccess = () => {
-      const all = (req.result || []) as unknown[];
-      const v4 = all.filter((d): d is SavedDocument =>
-        !!d && typeof d === "object" && "markdown" in d && "id" in d
-      );
-      resolve(v4);
-    };
-    req.onerror = () => reject(req.error);
-  });
+  const res = await fetch("/api/documents");
+  if (!res.ok) throw new Error("Failed to load documents");
+  return res.json();
 }
 
 export async function saveDocument(doc: SavedDocument): Promise<void> {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_NAME, "readwrite");
-    const store = tx.objectStore(STORE_NAME);
-    store.put(doc);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
+  const res = await fetch("/api/documents", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(doc),
   });
+  if (!res.ok) throw new Error("Failed to save document");
 }
 
 export async function deleteDocument(id: string): Promise<void> {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_NAME, "readwrite");
-    const store = tx.objectStore(STORE_NAME);
-    store.delete(id);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
+  const res = await fetch(`/api/documents?id=${encodeURIComponent(id)}`, {
+    method: "DELETE",
   });
+  if (!res.ok) throw new Error("Failed to delete document");
 }
+
+// ---------------------------------------------------------------------------
+// Migrate any leftover IndexedDB data into the server DB (runs once)
+// ---------------------------------------------------------------------------
+
+const IDB_NAME = "resumewise";
+const IDB_STORE = "documents";
+
+export async function migrateFromIndexedDB(): Promise<number> {
+  if (typeof window === "undefined" || !window.indexedDB) return 0;
+
+  try {
+    // Check if IDB exists without triggering upgrade
+    const dbs = await indexedDB.databases();
+    if (!dbs.some((d) => d.name === IDB_NAME)) return 0;
+
+    const db: IDBDatabase = await new Promise((resolve, reject) => {
+      const req = indexedDB.open(IDB_NAME);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+
+    if (!db.objectStoreNames.contains(IDB_STORE)) {
+      db.close();
+      return 0;
+    }
+
+    const docs: SavedDocument[] = await new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, "readonly");
+      const store = tx.objectStore(IDB_STORE);
+      const req = store.getAll();
+      req.onsuccess = () => resolve(req.result || []);
+      req.onerror = () => reject(req.error);
+    });
+
+    db.close();
+
+    if (docs.length === 0) return 0;
+
+    // Bulk-upload to server
+    const res = await fetch("/api/documents", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(docs),
+    });
+    if (!res.ok) return 0;
+
+    // Clear IDB after successful migration
+    const db2: IDBDatabase = await new Promise((resolve, reject) => {
+      const req = indexedDB.open(IDB_NAME);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+    await new Promise<void>((resolve) => {
+      const tx = db2.transaction(IDB_STORE, "readwrite");
+      tx.objectStore(IDB_STORE).clear();
+      tx.oncomplete = () => resolve();
+    });
+    db2.close();
+
+    return docs.length;
+  } catch {
+    return 0;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Pure document factories (no storage calls)
+// ---------------------------------------------------------------------------
 
 export function duplicateDocument(
   doc: SavedDocument,
@@ -196,15 +218,7 @@ export function createSampleDocument(name: string): SavedDocument {
   };
 }
 
-// Returns the count of legacy docs cleared during the v3→v4 upgrade. Read once
-// on app boot; the UI shows a toast if non-zero, then sets a flag so the toast
-// doesn't re-fire.
+// Legacy compat — no longer needed with server storage
 export function consumeDroppedLegacyCount(): number {
-  if (typeof window === "undefined") return 0;
-  if (window.localStorage.getItem(LEGACY_FLAG_KEY) === "1") return 0;
-  if (droppedLegacyCount > 0) {
-    window.localStorage.setItem(LEGACY_FLAG_KEY, "1");
-    return droppedLegacyCount;
-  }
   return 0;
 }
