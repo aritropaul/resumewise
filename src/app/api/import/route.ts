@@ -2,7 +2,7 @@
 // Non-streaming: blocks until the LLM finishes. Returns { markdown }.
 
 import { NextRequest, NextResponse } from "next/server";
-import { getProviderClient, resolveApiKey } from "@/lib/providers";
+import { resolveProviderClient } from "@/lib/resolve-key";
 
 const SYSTEM = `You are a resume importer. Convert raw resume text into a single structured markdown document following this exact convention:
 
@@ -66,10 +66,11 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "No text provided" }, { status: 400 });
     }
 
-    const apiKey = resolveApiKey(userKey);
-    if (!apiKey) return NextResponse.json({ error: "API key required" }, { status: 401 });
-
-    const client = getProviderClient(apiKey);
+    const resolved = await resolveProviderClient(userKey);
+    if ("error" in resolved) {
+      return NextResponse.json({ error: resolved.error }, { status: resolved.status });
+    }
+    const { client } = resolved;
     const userMsg = `Resume text:\n\n${text.slice(0, 20000)}`;
 
     let raw = "";

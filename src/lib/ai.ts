@@ -1,40 +1,11 @@
-// Provider auth + identification only. The AI response format for markdown
-// rewrites is handled inside /api/chat and /api/import, not via shared schemas.
-
-const STORAGE_KEY = "rw-api-key";
+// Provider types and client-side utilities.
+// API key storage moved to server-side encrypted storage (/api/keys).
 
 export type Provider = "anthropic" | "openai" | "gemini" | "grok" | "openrouter";
 
 export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
-}
-
-export function getApiKey(): string | null {
-  if (typeof window === "undefined") return null;
-  return localStorage.getItem(STORAGE_KEY);
-}
-
-export function setApiKey(key: string): void {
-  localStorage.setItem(STORAGE_KEY, key);
-}
-
-export function clearApiKey(): void {
-  localStorage.removeItem(STORAGE_KEY);
-}
-
-// Cached probe — server-key status doesn't change between requests in the same
-// session, so we only hit /api/has-key once.
-let serverKeyPromise: Promise<boolean> | null = null;
-export function checkServerKey(): Promise<boolean> {
-  if (typeof window === "undefined") return Promise.resolve(false);
-  if (!serverKeyPromise) {
-    serverKeyPromise = fetch("/api/has-key")
-      .then((r) => (r.ok ? r.json() : { available: false }))
-      .then((j) => !!(j as { available?: boolean }).available)
-      .catch(() => false);
-  }
-  return serverKeyPromise;
 }
 
 export function detectProvider(key: string): Provider {

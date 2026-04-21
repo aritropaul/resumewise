@@ -9,7 +9,6 @@ import { Button } from "@/components/ui/button";
 import { BezelCard } from "@/components/ui/card";
 import { AiDiffView } from "@/components/ai-diff-view";
 import { useResumeStore } from "@/lib/resume-store";
-import { getApiKey } from "@/lib/ai";
 import type { SavedDocument } from "@/lib/storage";
 import {
   applyDecisions,
@@ -99,8 +98,6 @@ export function AiPanel({
 
   const runRequest = async (mode: Mode, prompt: string) => {
     if (streaming) return;
-    const apiKey = getApiKey() || undefined;
-
     // Tailor mode creates/opens a job-matched variant (JD required).
     // Chat mode forks a plain variant on the first AI edit to protect the base.
     // Analyze is read-only critique — no fork.
@@ -132,7 +129,6 @@ export function AiPanel({
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          apiKey,
           messages: nextTurns,
           markdown,
           jobDescription,
@@ -207,7 +203,6 @@ export function AiPanel({
 
   const runScopedRequest = async (instruction: string) => {
     if (streaming || !aiSelectionChip) return;
-    const apiKey = getApiKey() || undefined;
     const chip = aiSelectionChip;
 
     const userTurn: ChatTurn = {
@@ -234,7 +229,6 @@ export function AiPanel({
       const replacement = await rewriteSelection({
         selection: chip.text,
         instruction,
-        apiKey,
         signal: ctrl.signal,
         onChunk: (acc) => setStreamingText(acc),
       });

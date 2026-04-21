@@ -1,6 +1,5 @@
 "use client";
 
-import { getApiKey } from "./ai";
 import type { JobSummary } from "./storage";
 
 export interface FitSuggestion {
@@ -71,12 +70,10 @@ export async function analyzeFit(
     if (hit) return { analysis: hit, cached: true };
   }
 
-  const apiKey = getApiKey();
   const res = await fetch("/api/analyze-fit", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      apiKey: apiKey ?? undefined,
       markdown: args.markdown,
       jobDescription: args.jobDescription,
     }),
@@ -111,14 +108,10 @@ export interface JobFetchResult {
 export async function summariseJob(
   jobDescription: string
 ): Promise<JobSummary> {
-  const apiKey = getApiKey();
   const res = await fetch("/api/job-summary", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      apiKey: apiKey ?? undefined,
-      jobDescription,
-    }),
+    body: JSON.stringify({ jobDescription }),
   });
   if (!res.ok) {
     const text = await res.text();

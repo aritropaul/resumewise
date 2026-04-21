@@ -5,7 +5,6 @@
 interface RewriteSelectionArgs {
   selection: string;
   instruction: string;
-  apiKey?: string;
   signal?: AbortSignal;
   onChunk?: (accumulated: string) => void;
 }
@@ -13,7 +12,6 @@ interface RewriteSelectionArgs {
 export async function rewriteSelection({
   selection,
   instruction,
-  apiKey,
   signal,
   onChunk,
 }: RewriteSelectionArgs): Promise<string> {
@@ -21,7 +19,6 @@ export async function rewriteSelection({
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      apiKey,
       messages: [],
       mode: "rewrite_selection",
       selection,

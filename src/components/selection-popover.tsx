@@ -11,7 +11,6 @@ import {
 } from "@phosphor-icons/react";
 import { toast } from "sonner";
 import { useResumeStore } from "@/lib/resume-store";
-import { getApiKey } from "@/lib/ai";
 import { rewriteSelection, applyScopedReplacement } from "@/lib/scoped-rewrite";
 import type { SavedDocument } from "@/lib/storage";
 
@@ -202,7 +201,6 @@ export function SelectionPopover({
   const runPreset = async (preset: (typeof PRESETS)[number]) => {
     if (busyPreset) return;
     if (!editorSelection) return;
-    const apiKey = getApiKey() || undefined;
     const snapshot = {
       text: editorSelection.value,
       start: editorSelection.start,
@@ -220,7 +218,6 @@ export function SelectionPopover({
       const replacement = await rewriteSelection({
         selection: snapshot.text,
         instruction: preset.instruction,
-        apiKey,
         signal: ctrl.signal,
       });
 

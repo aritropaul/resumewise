@@ -4,7 +4,7 @@
 // raw HTML-stripped paste.
 
 import { NextRequest } from "next/server";
-import { getProviderClient, resolveApiKey } from "@/lib/providers";
+import { resolveProviderClient } from "@/lib/resolve-key";
 import type { JobSummary } from "@/lib/storage";
 
 interface RequestBody {
@@ -62,12 +62,11 @@ export async function POST(req: NextRequest) {
     return Response.json({ error: "jobDescription required" }, { status: 400 });
   }
 
-  const apiKey = resolveApiKey(body.apiKey);
-  if (!apiKey) {
-    return Response.json({ error: "API key required" }, { status: 401 });
+  const resolved = await resolveProviderClient(body.apiKey);
+  if ("error" in resolved) {
+    return Response.json({ error: resolved.error }, { status: resolved.status });
   }
-
-  const client = getProviderClient(apiKey);
+  const { client } = resolved;
   const userPrompt = buildUserPrompt(body.jobDescription);
 
   try {

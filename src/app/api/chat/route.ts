@@ -4,7 +4,7 @@
 // against the original and presents hunk-level accept/reject UI.
 
 import { NextRequest } from "next/server";
-import { getProviderClient, resolveApiKey } from "@/lib/providers";
+import { resolveProviderClient } from "@/lib/resolve-key";
 
 interface ChatMessage {
   role: "user" | "assistant";
@@ -142,15 +142,14 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const apiKey = resolveApiKey(body.apiKey);
-  if (!apiKey) {
-    return new Response(JSON.stringify({ error: "API key required" }), {
-      status: 401,
+  const resolved = await resolveProviderClient(body.apiKey);
+  if ("error" in resolved) {
+    return new Response(JSON.stringify({ error: resolved.error }), {
+      status: resolved.status,
       headers: { "content-type": "application/json" },
     });
   }
-
-  const client = getProviderClient(apiKey);
+  const { client } = resolved;
   const system = buildSystemPrompt(body.mode);
 
   let userMessages: ChatMessage[];

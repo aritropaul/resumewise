@@ -39,7 +39,6 @@ import {
 import { useResumeStore } from "@/lib/resume-store";
 import { DocEditorPanel } from "@/components/doc-editor-panel";
 import { downloadResumePdf } from "@/lib/download-pdf";
-import { getApiKey } from "@/lib/ai";
 import { cn } from "@/lib/utils";
 import { UserMenu } from "@/components/user-menu";
 import { JobPanel, type SuggestionStatus } from "@/components/job-panel";
@@ -302,7 +301,7 @@ export default function Home() {
         const importRes = await fetch("/api/import", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ apiKey: getApiKey() || undefined, text }),
+          body: JSON.stringify({ text }),
         });
         if (!importRes.ok) {
           const err = await importRes.json().catch(() => ({ error: "import failed" })) as { error?: string };
