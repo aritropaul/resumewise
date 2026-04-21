@@ -2,94 +2,100 @@
 
 ## Project Overview
 
-ResumeWise is a local-first, browser-based resume editor with AI assistance. No auth, no server-side persistence — everything lives in IndexedDB. Users bring their own API key (Anthropic, OpenAI, Gemini, Grok, OpenRouter), with optional server-env fallback (`OPENAI_API_KEY`).
+ResumeWise is a multi-tenant resume editor SaaS with AI assistance. Users authenticate via email/password or Google OAuth (Better Auth). API keys are encrypted at rest (AES-256-GCM) per user. Dual deployment: local dev (better-sqlite3) and Cloudflare (D1).
 
-A resume is **structured JSON** (JSON Resume v1.0.0 superset). The editor is a form bound to that JSON. Live preview is a `react-pdf` document. Export is a real PDF blob, not `window.print()`.
+A resume is structured markdown. The editor is a form bound to that markdown. Live preview is a `react-pdf` document. Export is a real PDF blob.
 
 ### Stack
 - Next.js 16 (App Router) + React 19 + Tailwind 4 + shadcn (Base UI)
-- Persistence: IndexedDB v2 (`src/lib/storage.ts`)
+- Auth: Better Auth (email/password + Google OAuth)
+- Persistence: Dual backend — better-sqlite3 (local), Cloudflare D1 (prod)
 - PDF rendering: `@react-pdf/renderer`
-- PDF text extraction: `pdf2json` (server-side, plain text only)
+- PDF text extraction: `pdfjs-dist` (server-side, in-memory)
 - AI: Multi-provider via SSE streaming (`src/app/api/chat/route.ts`)
+- BYOK: Encrypted API keys in DB, resolved server-side (`src/lib/resolve-key.ts`)
 
-### Layout (3-panel, `src/app/page.tsx`)
+### Routing
+- `/` — Landing page (public)
+- `/login`, `/signup` — Auth pages
+- `/app` — Main 3-panel editor (authenticated)
+- `/app/settings` — API key management
+
+### Layout (3-panel, `src/app/app/page.tsx`)
 - **Left** — `DocSidebar`: document tree (base + variants), rename, duplicate, delete
-- **Center** — `ResumePreview`: live `react-pdf` PDFViewer + template picker
-- **Right** — tabbed Edit (`ResumeForm`) / AI (`AiPanel` with accept/reject) / Job (JD textarea)
+- **Center** — `CenterTabs`: edit (markdown) / preview (react-pdf)
+- **Right** — tabbed Design / AI (`AiPanel` with accept/reject) / Job (JD analysis)
+- Mobile: sidebars collapse to overlays with backdrop
 
 ### Key Files
 | File | Purpose |
 |------|---------|
-| `src/lib/resume-schema.ts` | TS types for `Resume` + per-section item factories (every item has a stable `id`) |
-| `src/lib/resume-ops.ts` | Pure typed-op application: `set_field`, `add_item`, `remove_item`, `move_item`, `rewrite_bullet` |
-| `src/lib/resume-ai-tools.ts` | AI tool schemas + tool-call → typed-op converter |
-| `src/lib/templates/classic.tsx` | First react-pdf `<Document>` template |
-| `src/lib/templates/index.ts` | Template registry keyed by `Resume.meta.template` |
-| `src/lib/ai.ts` | Provider detection, API-key management, server-key probe |
-| `src/lib/storage.ts` | IndexedDB v2 CRUD for `SavedDocument { resume: Resume }` |
-| `src/components/resume-form/*` | One controlled form per section (Basics/Summary/Work/Education/Skills/Projects/Awards) |
-| `src/components/resume-preview.tsx` | `PDFViewer` wrapper + `downloadResumePdf` helper |
-| `src/components/ai-panel.tsx` | Chat with typed-op accept/reject UI |
-| `src/components/doc-sidebar.tsx` | Document tree view |
+| `src/lib/providers.ts` | Shared provider config, model IDs, client factory |
+| `src/lib/auth.ts` | Better Auth server instance |
+| `src/lib/auth-client.ts` | Better Auth React client |
+| `src/lib/resolve-key.ts` | Server-side key resolution: stored key → body fallback → env var |
+| `src/lib/crypto.ts` | AES-256-GCM encrypt/decrypt via Web Crypto API |
+| `src/lib/key-storage.ts` | Dual-backend CRUD for encrypted API keys |
+| `src/lib/server-storage.ts` | Dual-backend document storage (sqlite + D1) |
+| `src/lib/storage.ts` | Client-side storage helpers + document factories |
+| `src/lib/ai.ts` | Provider types, detection, labels (client-side) |
+| `src/lib/templates/` | react-pdf `<Document>` templates (classic, modern, business, editorial, mono) |
+| `src/middleware.ts` | Auth middleware — redirects unauthenticated to /login |
 | `src/app/api/chat/route.ts` | SSE streaming for Anthropic + OpenAI-compatible providers |
-| `src/app/api/parse/route.ts` | PDF → plain text (heading hints in `lines[]`) |
-| `src/app/api/import/route.ts` | Plain text → `Resume` JSON via LLM (`response_format: json_object`) |
-| `src/app/api/has-key/route.ts` | Reports whether server has `OPENAI_API_KEY` set |
-
-## Editing Model
-
-The user's resume is structured JSON. Every array item carries a stable `id` so AI ops (and the form) can target items without positional coupling.
-
-### AI tool surface — five typed ops
-
-| Tool | Purpose |
-|------|---------|
-| `set_field` | Set any scalar by JSON path (`basics.email`, `work.<id>.position`, `work.<id>.highlights.0`) |
-| `add_item` | Append to a section array; new id generated server-side |
-| `remove_item` | Remove an item by id |
-| `move_item` | Reorder within a section |
-| `rewrite_bullet` | Rewrite a single highlight (most common edit) |
-
-Tool calls round-trip through `resume-ai-tools.ts:toolCallToOp` → `resume-ops.ts:applyOp`. There is no fuzzy text matching, no "Text not found" failure mode, no mark-preservation hacks. Every op is deterministic: an id either resolves or returns a structured error.
-
-### AI panel UX
-
-Tool calls from the model are queued as **pending edits**. The user reviews each (Accept / Reject) or hits **Accept all**. Applied ops feed back through the same `applyOp` path that the form uses, so undo / autosave behave identically for human and AI edits.
-
-## Templates
-
-Templates are react-pdf `<Document>` components in `src/lib/templates/`. Each takes `{ resume: Resume }` and renders one or more `<Page>`s. Pagination is handled by react-pdf's flow layout (no measurement code in app layer).
-
-To add a template:
-1. Create `src/lib/templates/<name>.tsx` exporting `<NameTemplate>`.
-2. Register in `templates/index.ts:TEMPLATES`.
-3. The template picker in `page.tsx` reads from `templateOptions()` automatically.
-
-## PDF Import
-
-1. `POST /api/parse` (multipart) → `{ text, lines }` extracted via `pdf2json`.
-2. `POST /api/import` (text) → `{ partial }` Resume-shaped JSON via LLM.
-3. Client merges `partial` into a full `Resume` via `mergePartialIntoResume` in `page.tsx` — every item gets an id, unknown fields are dropped.
-4. New doc saved to IndexedDB.
+| `src/app/api/parse/route.ts` | PDF → plain text via pdfjs-dist (in-memory) |
+| `src/app/api/import/route.ts` | Plain text → structured markdown via LLM |
+| `src/app/api/keys/route.ts` | BYOK key management (list, save, delete) |
+| `src/app/api/documents/route.ts` | Document CRUD (user-scoped) |
+| `src/app/api/auth/[...all]/route.ts` | Better Auth catch-all |
 
 ## Storage
 
-- IndexedDB DB name `resumewise`, store `documents`, version **2**.
-- v1 docs (with `htmlContent` / `editorJson`) are dropped on upgrade. The UI shows a one-time toast (`consumeDroppedLegacyCount`) suggesting re-import.
-- `SavedDocument`: `{ id, name, date, resume, parentId?, collapsed?, documentType? }`.
+Dual backend via `StorageBackend` interface in `src/lib/server-storage.ts`:
+- **Local dev**: better-sqlite3 at `~/.resumewise/resumewise.db`
+- **Cloudflare**: D1 via `@opennextjs/cloudflare` bindings
+- `getStorage()` detects environment at runtime
+- All queries scoped by `user_id`
+- D1 migration at `migrations/0001_initial.sql`
+
+## BYOK (Bring Your Own Key)
+
+- Keys encrypted with AES-256-GCM (Web Crypto API) using `ENCRYPTION_KEY` env var
+- Stored in `api_keys` table: `{ user_id, provider, encrypted_key, iv, key_prefix }`
+- `resolveProviderClient()` in `resolve-key.ts` handles key resolution:
+  1. User's stored key from DB (preferred)
+  2. Key from request body (backward compat)
+  3. Server `OPENAI_API_KEY` env var (fallback)
+- Settings UI at `/app/settings` for per-provider key management
+
+## Auth
+
+- Better Auth with email/password + Google OAuth
+- Session cookie: `better-auth.session_token`
+- Middleware at `src/middleware.ts` gates all `/app/*` and `/api/*` routes (except `/api/auth/*`)
+- API routes extract userId via `auth.api.getSession()`
+
+## PDF Import
+
+1. `POST /api/parse` (multipart) → `{ text, lines }` via `pdfjs-dist` (in-memory, no temp files)
+2. `POST /api/import` (text) → `{ markdown }` via LLM
+3. Client saves new document
 
 ## Conventions
 
-- Heavy components (`ResumePreview`, `DocSidebar`, `AiPanel`) are dynamically imported with `{ ssr: false }` in `page.tsx`.
-- Forms are controlled — every `onChange` produces a new `Resume` object via spread + slice (no mutation).
-- Autosave is a 600ms debounced `saveDocument(doc)` per resume mutation.
-- Bullets are plain text. Markdown emphasis is allowed where the template renders it.
-- Date strings are free-form (e.g. "Jan 2023", "Present"); never normalize.
-- Item ids are UUIDs assigned at creation; preserved across edits and across stored sessions.
+- Heavy components dynamically imported with `{ ssr: false }` in `page.tsx`
+- Autosave: 600ms debounced `saveDocument(doc)` per mutation
+- Date strings are free-form; never normalize
+- Provider config centralized in `src/lib/providers.ts` (single source of truth for model IDs)
 
 ## Conventions for AI work in this repo
 
-- The chat route's `HARD_RULES` constant carries the **humanizer** rules (banned vocab, banned phrasings, banned structural patterns). Apply them to any new prompt mode.
+- The chat route's `HARD_RULES` constant carries the **humanizer** rules. Apply to any new prompt mode.
 - Never invent a `format_text`-style tool — formatting belongs to the template.
-- New AI tools must (a) be deterministic by id, (b) round-trip through `applyOp`, (c) have a `describeOp` line so the accept/reject UI shows something readable.
+- New AI tools must (a) be deterministic by id, (b) round-trip through `applyOp`, (c) have a `describeOp` line.
+
+## Cloudflare Deployment
+
+- `wrangler.toml` configured with D1 binding
+- `@opennextjs/cloudflare` adapter
+- Scripts: `cf:build`, `cf:preview`, `cf:deploy`, `d1:migrate`
+- Secrets needed: `ENCRYPTION_KEY`, `BETTER_AUTH_SECRET`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`

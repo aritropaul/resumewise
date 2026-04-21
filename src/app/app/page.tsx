@@ -81,8 +81,9 @@ export default function Home() {
   const [files, setFiles] = useState<SavedDocument[]>([]);
   const [loadingDocs, setLoadingDocs] = useState(true);
   const [rightTab, setRightTab] = useState<RightTab>("design");
-  const [leftOpen, setLeftOpen] = useState(true);
-  const [rightOpen, setRightOpen] = useState(true);
+  const isMobile = typeof window !== "undefined" && window.innerWidth < 768;
+  const [leftOpen, setLeftOpen] = useState(!isMobile);
+  const [rightOpen, setRightOpen] = useState(!isMobile);
   const [theme, setTheme] = useState<"light" | "dark">("light");
   const [isDownloading, setIsDownloading] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -829,7 +830,7 @@ export default function Home() {
 
         <button
           onClick={() => setPaletteOpen(true)}
-          className="h-7 inline-flex items-center gap-1.5 px-2 rounded-[var(--radius-md)] text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition-[background-color,color] duration-150"
+          className="h-7 inline-flex items-center gap-1.5 px-2 rounded-[var(--radius-md)] text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition-[background-color,color] duration-150 max-md:hidden"
         >
           <MagnifyingGlass weight="light" className="size-3.5" />
           <span>find</span>
@@ -848,6 +849,7 @@ export default function Home() {
           aria-label="keyboard shortcuts"
           onClick={() => setShortcutOpen(true)}
           size="sm"
+          className="max-md:hidden"
         >
           <Keyboard weight="light" />
         </IconButton>
@@ -876,9 +878,16 @@ export default function Home() {
         <UserMenu />
       </header>
 
-      <div className="flex-1 flex min-h-0">
+      <div className="flex-1 flex min-h-0 relative">
+        {/* Mobile backdrop */}
+        {(leftOpen || rightOpen) && (
+          <div
+            className="hidden max-md:block fixed inset-0 bg-black/30 z-30 top-11"
+            onClick={() => { setLeftOpen(false); setRightOpen(false); }}
+          />
+        )}
         {leftOpen && (
-          <aside className="w-60 bg-background text-foreground border-r border-border flex flex-col min-h-0">
+          <aside className="w-60 bg-background text-foreground border-r border-border flex flex-col min-h-0 max-md:fixed max-md:inset-y-0 max-md:left-0 max-md:z-40 max-md:shadow-lg max-md:top-11">
             <div className="flex items-center justify-between px-3 pt-3 pb-2">
               <span className="text-label text-muted-foreground">documents</span>
               <span
@@ -941,7 +950,7 @@ export default function Home() {
         </main>
 
         {rightOpen && activeFile && (
-          <aside className="w-[360px] bg-background border-l border-border flex flex-col min-h-0">
+          <aside className="w-[360px] max-md:w-full bg-background border-l border-border flex flex-col min-h-0 max-md:fixed max-md:inset-y-0 max-md:right-0 max-md:z-40 max-md:shadow-lg max-md:top-11 max-md:border-l-0">
             <Tabs
               value={rightTab}
               onValueChange={(v) => setInspectorTab(v as RightTab)}
