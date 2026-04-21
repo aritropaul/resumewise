@@ -21,6 +21,7 @@
     "@base-ui/react": "^1.4.0",
     "@phosphor-icons/react": "^2.1.10",
     "@react-pdf/renderer": "^4.4.1",
+    "better-auth": "^1.6.6",
     "better-sqlite3": "^12.9.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",

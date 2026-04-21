@@ -41,6 +41,7 @@ import { DocEditorPanel } from "@/components/doc-editor-panel";
 import { downloadResumePdf } from "@/lib/download-pdf";
 import { getApiKey } from "@/lib/ai";
 import { cn } from "@/lib/utils";
+import { UserMenu } from "@/components/user-menu";
 import { JobPanel, type SuggestionStatus } from "@/components/job-panel";
 import {
   buildVariantName,
@@ -872,6 +873,8 @@ export default function Home() {
         >
           <SidebarSimple weight="light" />
         </IconButton>
+
+        <UserMenu />
       </header>
 
       <div className="flex-1 flex min-h-0">
