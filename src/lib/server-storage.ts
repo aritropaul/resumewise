@@ -134,12 +134,13 @@ let _sqliteBackend: StorageBackend | null = null;
 function getSqliteBackend(): StorageBackend {
   if (_sqliteBackend) return _sqliteBackend;
 
-  // Dynamic import to avoid loading native module on Cloudflare
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const Database = require("better-sqlite3");
-  const path = require("node:path");
-  const os = require("node:os");
-  const fs = require("node:fs");
+  // Dynamic require hidden from bundler — prevents Vercel from resolving native module
+  // eslint-disable-next-line no-eval
+  const _require = eval("require");
+  const Database = _require("better-sqlite3");
+  const path = _require("node:path");
+  const os = _require("node:os");
+  const fs = _require("node:fs");
 
   const DATA_DIR = path.join(os.homedir(), ".resumewise");
   const DB_PATH = path.join(DATA_DIR, "resumewise.db");

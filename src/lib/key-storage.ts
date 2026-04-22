@@ -47,11 +47,12 @@ let _sqliteBackend: KeyStorageBackend | null = null;
 function getSqliteKeyBackend(): KeyStorageBackend {
   if (_sqliteBackend) return _sqliteBackend;
 
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const Database = require("better-sqlite3");
-  const path = require("node:path");
-  const os = require("node:os");
-  const fs = require("node:fs");
+  // eslint-disable-next-line no-eval
+  const _require = eval("require");
+  const Database = _require("better-sqlite3");
+  const path = _require("node:path");
+  const os = _require("node:os");
+  const fs = _require("node:fs");
 
   const DATA_DIR = path.join(os.homedir(), ".resumewise");
   fs.mkdirSync(DATA_DIR, { recursive: true });

@@ -13,11 +13,14 @@ function getDatabase(): unknown {
 
   // Local dev: better-sqlite3 (dynamic require to avoid bundling on Vercel)
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const Database = require("better-sqlite3");
-    const path = require("node:path");
-    const os = require("node:os");
-    const fs = require("node:fs");
+    // Dynamic require hidden from bundler to prevent Vercel from
+    // trying to resolve the native module when D1 is available
+    // eslint-disable-next-line @typescript-eslint/no-require-imports, no-eval
+    const _require = eval("require");
+    const Database = _require("better-sqlite3");
+    const path = _require("node:path");
+    const os = _require("node:os");
+    const fs = _require("node:fs");
 
     const DATA_DIR = path.join(os.homedir(), ".resumewise");
     fs.mkdirSync(DATA_DIR, { recursive: true });
