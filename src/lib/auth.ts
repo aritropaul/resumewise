@@ -1,9 +1,17 @@
-// Better Auth server instance. Dual backend: better-sqlite3 local, D1 production.
+// Better Auth server instance. Dual backend:
+// Local dev: better-sqlite3 at ~/.resumewise/resumewise.db
+// Production (Vercel): D1 via HTTP API
 
 import { betterAuth } from "better-auth";
 import { nextCookies } from "better-auth/next-js";
+import { createD1HttpDatabase } from "./d1-http";
 
 function getDatabase(): unknown {
+  // Production: D1 HTTP API
+  const d1 = createD1HttpDatabase();
+  if (d1) return d1;
+
+  // Local dev: better-sqlite3
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const Database = require("better-sqlite3");
   const path = require("node:path");
