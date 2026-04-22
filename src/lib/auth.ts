@@ -14,11 +14,64 @@ function getDatabase(): unknown {
   fs.mkdirSync(DATA_DIR, { recursive: true });
   const DB_PATH = path.join(DATA_DIR, "resumewise.db");
 
-  return new Database(DB_PATH);
+  const db = new Database(DB_PATH);
+  db.pragma("journal_mode = WAL");
+  db.pragma("foreign_keys = ON");
+
+  // Create Better Auth tables if missing
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS user (
+      id TEXT PRIMARY KEY,
+      email TEXT NOT NULL UNIQUE,
+      name TEXT,
+      image TEXT,
+      emailVerified INTEGER NOT NULL DEFAULT 0,
+      createdAt TEXT NOT NULL DEFAULT (datetime('now')),
+      updatedAt TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS session (
+      id TEXT PRIMARY KEY,
+      userId TEXT NOT NULL REFERENCES user(id) ON DELETE CASCADE,
+      expiresAt TEXT NOT NULL,
+      token TEXT NOT NULL UNIQUE,
+      ipAddress TEXT,
+      userAgent TEXT,
+      createdAt TEXT NOT NULL DEFAULT (datetime('now')),
+      updatedAt TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS account (
+      id TEXT PRIMARY KEY,
+      userId TEXT NOT NULL REFERENCES user(id) ON DELETE CASCADE,
+      accountId TEXT NOT NULL,
+      providerId TEXT NOT NULL,
+      accessToken TEXT,
+      refreshToken TEXT,
+      accessTokenExpiresAt TEXT,
+      refreshTokenExpiresAt TEXT,
+      scope TEXT,
+      idToken TEXT,
+      password TEXT,
+      createdAt TEXT NOT NULL DEFAULT (datetime('now')),
+      updatedAt TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS verification (
+      id TEXT PRIMARY KEY,
+      identifier TEXT NOT NULL,
+      value TEXT NOT NULL,
+      expiresAt TEXT NOT NULL,
+      createdAt TEXT NOT NULL DEFAULT (datetime('now')),
+      updatedAt TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+
+  return db;
 }
 
 export const auth = betterAuth({
   database: getDatabase(),
+  trustedOrigins: [
+    process.env.BETTER_AUTH_URL || "http://localhost:3000",
+  ],
   emailAndPassword: {
     enabled: true,
   },
