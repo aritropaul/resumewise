@@ -1,78 +1,81 @@
 // Better Auth server instance. Dual backend:
-// Local dev: better-sqlite3 at ~/.resumewise/resumewise.db
-// Production (Vercel): D1 via HTTP API
+// Production (Vercel): D1 via HTTP API — no native modules
+// Local dev: better-sqlite3 — only loaded when D1 env vars absent
 
 import { betterAuth } from "better-auth";
 import { nextCookies } from "better-auth/next-js";
 import { createD1HttpDatabase } from "./d1-http";
 
 function getDatabase(): unknown {
-  // Production: D1 HTTP API
+  // Production: D1 HTTP API (no native modules needed)
   const d1 = createD1HttpDatabase();
   if (d1) return d1;
 
-  // Local dev: better-sqlite3
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const Database = require("better-sqlite3");
-  const path = require("node:path");
-  const os = require("node:os");
-  const fs = require("node:fs");
+  // Local dev: better-sqlite3 (dynamic require to avoid bundling on Vercel)
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const Database = require("better-sqlite3");
+    const path = require("node:path");
+    const os = require("node:os");
+    const fs = require("node:fs");
 
-  const DATA_DIR = path.join(os.homedir(), ".resumewise");
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  const DB_PATH = path.join(DATA_DIR, "resumewise.db");
+    const DATA_DIR = path.join(os.homedir(), ".resumewise");
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    const DB_PATH = path.join(DATA_DIR, "resumewise.db");
 
-  const db = new Database(DB_PATH);
-  db.pragma("journal_mode = WAL");
-  db.pragma("foreign_keys = ON");
+    const db = new Database(DB_PATH);
+    db.pragma("journal_mode = WAL");
+    db.pragma("foreign_keys = ON");
 
-  // Create Better Auth tables if missing
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS user (
-      id TEXT PRIMARY KEY,
-      email TEXT NOT NULL UNIQUE,
-      name TEXT,
-      image TEXT,
-      emailVerified INTEGER NOT NULL DEFAULT 0,
-      createdAt TEXT NOT NULL DEFAULT (datetime('now')),
-      updatedAt TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-    CREATE TABLE IF NOT EXISTS session (
-      id TEXT PRIMARY KEY,
-      userId TEXT NOT NULL REFERENCES user(id) ON DELETE CASCADE,
-      expiresAt TEXT NOT NULL,
-      token TEXT NOT NULL UNIQUE,
-      ipAddress TEXT,
-      userAgent TEXT,
-      createdAt TEXT NOT NULL DEFAULT (datetime('now')),
-      updatedAt TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-    CREATE TABLE IF NOT EXISTS account (
-      id TEXT PRIMARY KEY,
-      userId TEXT NOT NULL REFERENCES user(id) ON DELETE CASCADE,
-      accountId TEXT NOT NULL,
-      providerId TEXT NOT NULL,
-      accessToken TEXT,
-      refreshToken TEXT,
-      accessTokenExpiresAt TEXT,
-      refreshTokenExpiresAt TEXT,
-      scope TEXT,
-      idToken TEXT,
-      password TEXT,
-      createdAt TEXT NOT NULL DEFAULT (datetime('now')),
-      updatedAt TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-    CREATE TABLE IF NOT EXISTS verification (
-      id TEXT PRIMARY KEY,
-      identifier TEXT NOT NULL,
-      value TEXT NOT NULL,
-      expiresAt TEXT NOT NULL,
-      createdAt TEXT NOT NULL DEFAULT (datetime('now')),
-      updatedAt TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-  `);
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS user (
+        id TEXT PRIMARY KEY,
+        email TEXT NOT NULL UNIQUE,
+        name TEXT,
+        image TEXT,
+        emailVerified INTEGER NOT NULL DEFAULT 0,
+        createdAt TEXT NOT NULL DEFAULT (datetime('now')),
+        updatedAt TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE TABLE IF NOT EXISTS session (
+        id TEXT PRIMARY KEY,
+        userId TEXT NOT NULL REFERENCES user(id) ON DELETE CASCADE,
+        expiresAt TEXT NOT NULL,
+        token TEXT NOT NULL UNIQUE,
+        ipAddress TEXT,
+        userAgent TEXT,
+        createdAt TEXT NOT NULL DEFAULT (datetime('now')),
+        updatedAt TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE TABLE IF NOT EXISTS account (
+        id TEXT PRIMARY KEY,
+        userId TEXT NOT NULL REFERENCES user(id) ON DELETE CASCADE,
+        accountId TEXT NOT NULL,
+        providerId TEXT NOT NULL,
+        accessToken TEXT,
+        refreshToken TEXT,
+        accessTokenExpiresAt TEXT,
+        refreshTokenExpiresAt TEXT,
+        scope TEXT,
+        idToken TEXT,
+        password TEXT,
+        createdAt TEXT NOT NULL DEFAULT (datetime('now')),
+        updatedAt TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE TABLE IF NOT EXISTS verification (
+        id TEXT PRIMARY KEY,
+        identifier TEXT NOT NULL,
+        value TEXT NOT NULL,
+        expiresAt TEXT NOT NULL,
+        createdAt TEXT NOT NULL DEFAULT (datetime('now')),
+        updatedAt TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+    `);
 
-  return db;
+    return db;
+  } catch {
+    throw new Error("No database available: set CLOUDFLARE_* env vars or install better-sqlite3");
+  }
 }
 
 export const auth = betterAuth({
