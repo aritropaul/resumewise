@@ -10,6 +10,7 @@ interface KeyMeta {
   provider: string;
   keyPrefix: string;
   createdAt: string;
+  source?: "env" | "db";
 }
 
 const PROVIDERS: { id: Provider; label: string; placeholder: string }[] = [
@@ -88,17 +89,22 @@ export default function SettingsPage() {
         <h1 className="font-serif text-2xl tracking-tight mb-1">Settings</h1>
         <p className="text-sm text-muted-foreground mb-8">
           Manage your API keys. Keys are encrypted at rest.
+          <br />
+          <span className="text-muted-foreground/70">
+            Any one key unlocks all AI features — import, rewrite, tailor, analyze.
+          </span>
         </p>
 
         <div className="flex flex-col gap-4">
-          {PROVIDERS.map((p) => {
+          {PROVIDERS.map((p, i) => {
             const existing = keys.find((k) => k.provider === p.id);
             const isAdding = adding === p.id;
 
             return (
               <div
                 key={p.id}
-                className="border border-border rounded-md p-4"
+                className="border border-border rounded-md p-4 animate-in fade-in slide-in-from-bottom-1 duration-200"
+                style={{ animationDelay: `${i * 50}ms`, animationFillMode: "both" }}
               >
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
@@ -111,13 +117,19 @@ export default function SettingsPage() {
                       <code className="text-xs text-muted-foreground bg-muted px-2 py-0.5 rounded">
                         {existing.keyPrefix}
                       </code>
-                      <button
-                        onClick={() => handleDelete(p.id)}
-                        className="text-muted-foreground hover:text-red-500 transition-colors"
-                        aria-label={`remove ${p.label} key`}
-                      >
-                        <Trash weight="light" className="size-4" />
-                      </button>
+                      {existing.source === "env" ? (
+                        <span className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground/60">
+                          server
+                        </span>
+                      ) : (
+                        <button
+                          onClick={() => handleDelete(p.id)}
+                          className="text-muted-foreground hover:text-red-500 transition-colors"
+                          aria-label={`remove ${p.label} key`}
+                        >
+                          <Trash weight="light" className="size-4" />
+                        </button>
+                      )}
                     </div>
                   ) : !isAdding ? (
                     <button

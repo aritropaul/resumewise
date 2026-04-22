@@ -13,6 +13,12 @@ async function getUserId(): Promise<string | null> {
   }
 }
 
+// Env var → provider mapping for server-provided keys
+const ENV_KEY_MAP: { env: string; provider: string; prefix: (v: string) => string }[] = [
+  { env: "OPENAI_API_KEY", provider: "openai", prefix: (v) => v.slice(0, 5) + "..." },
+  { env: "ANTHROPIC_API_KEY", provider: "anthropic", prefix: (v) => v.slice(0, 7) + "..." },
+];
+
 // GET /api/keys — list key metadata (no plaintext)
 export async function GET() {
   const userId = await getUserId();
@@ -20,6 +26,21 @@ export async function GET() {
 
   const ks = await getKeyStorage();
   const meta = await ks.listMeta(userId);
+
+  // Include server env-var keys so settings page reflects them
+  const dbProviders = new Set(meta.map((m) => m.provider));
+  for (const e of ENV_KEY_MAP) {
+    const val = process.env[e.env];
+    if (val && !dbProviders.has(e.provider)) {
+      meta.push({
+        provider: e.provider,
+        keyPrefix: e.prefix(val),
+        createdAt: "",
+        source: "env",
+      } as typeof meta[number] & { source: string });
+    }
+  }
+
   return NextResponse.json(meta);
 }
 

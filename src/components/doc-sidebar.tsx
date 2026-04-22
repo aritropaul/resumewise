@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useCallback, useRef, useEffect } from "react";
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import {
   CaretRight,
   Plus,
@@ -71,6 +72,7 @@ export function DocSidebar({
     setRenameValue("");
   }, []);
 
+  const prefersReducedMotion = useReducedMotion();
   const bases = files.filter((f) => !f.parentId);
   const variantMap = new Map<string, SavedDocument[]>();
   for (const f of files) {
@@ -89,6 +91,7 @@ export function DocSidebar({
             no resumes yet
           </div>
         )}
+        <AnimatePresence mode="popLayout" initial={false}>
         {bases.map((base, baseIdx) => {
           const variants = variantMap.get(base.id) || [];
           const hasVariants = variants.length > 0;
@@ -97,7 +100,15 @@ export function DocSidebar({
           const trimmedName = base.name.replace(/\.pdf$/i, "");
 
           return (
-            <div key={base.id} className="mb-0.5">
+            <motion.div
+              key={base.id}
+              className="mb-0.5"
+              layout={!prefersReducedMotion}
+              initial={prefersReducedMotion ? false : { opacity: 0, y: -4 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={prefersReducedMotion ? undefined : { opacity: 0, height: 0, overflow: "hidden" }}
+              transition={{ duration: 0.2, ease: [0.32, 0.72, 0, 1], delay: Math.min(baseIdx, 10) * 0.03 }}
+            >
               {/* Base row */}
               <div
                 className={cn(
@@ -191,6 +202,7 @@ export function DocSidebar({
               </div>
 
               {/* Variants */}
+              <AnimatePresence initial={false}>
               {!isCollapsed &&
                 variants.map((variant, varIdx) => {
                   const isVarActive = activeId === variant.id;
@@ -202,8 +214,15 @@ export function DocSidebar({
                       ? rawVariantName.slice(trimmedName.length + 1)
                       : rawVariantName;
                   return (
-                    <div
+                    <motion.div
                       key={variant.id}
+                      initial={prefersReducedMotion ? false : { opacity: 0, height: 0 }}
+                      animate={{ opacity: 1, height: "auto" }}
+                      exit={prefersReducedMotion ? undefined : { opacity: 0, height: 0 }}
+                      transition={{ duration: 0.15, ease: [0.32, 0.72, 0, 1] }}
+                      style={{ overflow: "hidden" }}
+                    >
+                    <div
                       className={cn(
                         "group w-full flex items-stretch gap-0 rounded-sm transition-[background-color] duration-150 ease-[var(--ease-quart)]",
                         isVarActive
@@ -262,11 +281,14 @@ export function DocSidebar({
                         onDelete={() => onDelete(variant.id)}
                       />
                     </div>
+                    </motion.div>
                   );
                 })}
-            </div>
+              </AnimatePresence>
+            </motion.div>
           );
         })}
+        </AnimatePresence>
       </div>
 
       {/* Bottom actions — flat, mono-labeled */}

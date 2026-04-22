@@ -50,7 +50,7 @@ export function UserMenu() {
       </button>
 
       {open && (
-        <div className="absolute right-0 top-full mt-1 w-48 bg-background border border-border rounded-md shadow-lg py-1 z-50">
+        <div className="absolute right-0 top-full mt-1 w-48 bg-background border border-border rounded-md shadow-lg py-1 z-50 animate-in fade-in slide-in-from-bottom-1 duration-100" style={{ animationFillMode: "both" }}>
           <div className="px-3 py-2 border-b border-border">
             <p className="text-sm font-medium truncate">{user.name}</p>
             <p className="text-xs text-muted-foreground truncate">

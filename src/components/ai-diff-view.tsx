@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import { Check, X } from "@phosphor-icons/react";
+import { motion, useReducedMotion } from "framer-motion";
 import { cn } from "@/lib/utils";
 import type { DiffHunk, HunkStatus } from "@/lib/resume-diff";
 import { formatHunkSummary } from "@/lib/resume-diff";
@@ -46,6 +47,7 @@ export function AiDiffView({
   }
 
   const accepted = Array.from(decisions.values()).filter((s) => s === "accepted").length;
+  const prefersReducedMotion = useReducedMotion();
 
   return (
     <div className="flex flex-col gap-2">
@@ -71,10 +73,17 @@ export function AiDiffView({
         </div>
       </div>
 
-      {hunks.map((h) => {
+      {hunks.map((h, i) => {
         const status = decisions.get(h.id) ?? "pending";
         return (
-          <HunkCard key={h.id} hunk={h} status={status} onDecide={onDecide} />
+          <motion.div
+            key={h.id}
+            initial={prefersReducedMotion ? false : { opacity: 0, y: 6 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.2, ease: [0.32, 0.72, 0, 1], delay: Math.min(i, 8) * 0.04 }}
+          >
+            <HunkCard hunk={h} status={status} onDecide={onDecide} />
+          </motion.div>
         );
       })}
 

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import dynamic from "next/dynamic";
 import {
   Sidebar,
@@ -57,6 +58,11 @@ import {
   type FitAnalysis,
 } from "@/lib/fit-analyzer";
 import { applySuggestion } from "@/lib/apply-suggestion";
+import { useOnboarding } from "@/lib/use-onboarding";
+const OnboardingFlow = dynamic(
+  () => import("@/components/onboarding").then((m) => m.OnboardingFlow),
+  { ssr: false }
+);
 
 const CenterTabs = dynamic(
   () => import("@/components/center-tabs").then((m) => m.CenterTabs),
@@ -78,6 +84,7 @@ type SaveState = "idle" | "saving" | "saved";
 type CenterTab = "edit" | "preview";
 
 export default function Home() {
+  const router = useRouter();
   const [files, setFiles] = useState<SavedDocument[]>([]);
   const [loadingDocs, setLoadingDocs] = useState(true);
   const [rightTab, setRightTab] = useState<RightTab>("design");
@@ -121,6 +128,7 @@ export default function Home() {
   const store = useResumeStore();
   const { markdown, activeId, theme: resumeTheme, template } = store;
   const activeFile = files.find((f) => f.id === activeId) ?? null;
+  const onboarding = useOnboarding(!loadingDocs, files.length);
   const jobDescription = activeFile?.jobDescription ?? null;
   const centerTab: CenterTab = activeId
     ? (centerTabByDoc[activeId] ?? "edit")
@@ -320,10 +328,27 @@ export default function Home() {
         toast.success(`imported ${baseName}`, { id: importToast });
       } catch (e) {
         console.error("Import failed", e);
-        toast.error(`import failed: ${(e as Error).message}`, { id: importToast });
+        const msg = (e as Error).message;
+        if (msg.includes("No API key") || msg.includes("No provider key")) {
+          toast.dismiss(importToast);
+          if (onboarding.step !== "done") {
+            onboarding.goToStep("api-key");
+          } else {
+            toast.error("an API key is needed to import PDFs", {
+              description: "importing uses AI to structure your resume.",
+              action: {
+                label: "add key",
+                onClick: () => router.push("/app/settings"),
+              },
+              duration: 8000,
+            });
+          }
+        } else {
+          toast.error(`import failed: ${msg}`, { id: importToast });
+        }
       }
     },
-    [activateDoc]
+    [activateDoc, onboarding, router]
   );
 
   const handleImportBackup = useCallback(() => {
@@ -880,14 +905,12 @@ export default function Home() {
 
       <div className="flex-1 flex min-h-0 relative">
         {/* Mobile backdrop */}
-        {(leftOpen || rightOpen) && (
-          <div
-            className="hidden max-md:block fixed inset-0 bg-black/30 z-30 top-11"
-            onClick={() => { setLeftOpen(false); setRightOpen(false); }}
-          />
-        )}
-        {leftOpen && (
-          <aside className="w-60 bg-background text-foreground border-r border-border flex flex-col min-h-0 max-md:fixed max-md:inset-y-0 max-md:left-0 max-md:z-40 max-md:shadow-lg max-md:top-11">
+        <div
+          className={`hidden max-md:block fixed inset-0 bg-black/30 z-30 top-11 transition-opacity duration-200 ease-[var(--ease-ios)] ${leftOpen || rightOpen ? "opacity-100" : "opacity-0 pointer-events-none"}`}
+          onClick={() => { setLeftOpen(false); setRightOpen(false); }}
+        />
+        <aside className={`bg-background text-foreground border-r border-border flex flex-col min-h-0 overflow-hidden transition-[width] duration-200 ease-[var(--ease-ios)] max-md:fixed max-md:inset-y-0 max-md:left-0 max-md:z-40 max-md:shadow-lg max-md:top-11 max-md:transition-transform max-md:duration-200 ${leftOpen ? "w-60 max-md:translate-x-0" : "w-0 max-md:-translate-x-full max-md:w-60"}`}>
+          <div className="min-w-60 flex flex-col min-h-0 h-full">
             <div className="flex items-center justify-between px-3 pt-3 pb-2">
               <span className="text-label text-muted-foreground">documents</span>
               <span
@@ -922,8 +945,8 @@ export default function Home() {
                 if (e.target) e.target.value = "";
               }}
             />
-          </aside>
-        )}
+          </div>
+        </aside>
 
         <main className="flex-1 min-w-0 flex flex-col bg-background">
           {activeFile ? (
@@ -939,6 +962,13 @@ export default function Home() {
                 onOpenAiTab={openAiTab}
               />
             </div>
+          ) : onboarding.step !== "done" ? (
+            <OnboardingFlow
+              state={onboarding}
+              onCreate={handleCreateBlank}
+              onUpload={handleUpload}
+              onImportBackup={handleImportBackup}
+            />
           ) : (
             <EmptyState
               loading={loadingDocs}
@@ -949,75 +979,77 @@ export default function Home() {
           )}
         </main>
 
-        {rightOpen && activeFile && (
-          <aside className="w-[360px] max-md:w-full bg-background border-l border-border flex flex-col min-h-0 max-md:fixed max-md:inset-y-0 max-md:right-0 max-md:z-40 max-md:shadow-lg max-md:top-11 max-md:border-l-0">
-            <Tabs
-              value={rightTab}
-              onValueChange={(v) => setInspectorTab(v as RightTab)}
-              className="flex-1 min-h-0 flex flex-col"
-            >
-              <div className="flex items-center px-3 h-11 border-b border-border">
-                <TabsList variant="pill" className="w-full">
-                  <TabsTab value="design" variant="pill">
-                    design
-                  </TabsTab>
-                  <TabsTab value="ai" variant="pill">
-                    ai
-                  </TabsTab>
-                  <TabsTab value="job" variant="pill">
-                    job
-                  </TabsTab>
-                </TabsList>
-              </div>
-              <TabsPanel
-                value="design"
-                className="flex-1 min-h-0 flex flex-col data-[hidden]:hidden animate-panel-in"
+        {activeFile && (
+          <aside className={`bg-background border-l border-border flex flex-col min-h-0 overflow-hidden transition-[width] duration-200 ease-[var(--ease-ios)] max-md:fixed max-md:inset-y-0 max-md:right-0 max-md:z-40 max-md:shadow-lg max-md:top-11 max-md:border-l-0 max-md:transition-transform max-md:duration-200 ${rightOpen ? "w-[360px] max-md:w-full max-md:translate-x-0" : "w-0 max-md:translate-x-full max-md:w-full"}`}>
+            <div className="min-w-[360px] max-md:min-w-full flex flex-col min-h-0 h-full">
+              <Tabs
+                value={rightTab}
+                onValueChange={(v) => setInspectorTab(v as RightTab)}
+                className="flex-1 min-h-0 flex flex-col"
               >
-                <DocEditorPanel mode={centerTab} />
-              </TabsPanel>
-              <TabsPanel
-                value="ai"
-                className="flex-1 min-h-0 flex flex-col data-[hidden]:hidden animate-panel-in"
-              >
-                <AiPanel
-                  markdown={markdown}
-                  activeFile={activeFile}
-                  jobDescription={jobDescription}
-                  onEnsureVariant={ensureVariantForJob}
-                  onEnsureAiFork={ensureAiFork}
-                />
-              </TabsPanel>
-              <TabsPanel
-                value="job"
-                className="flex-1 min-h-0 flex flex-col data-[hidden]:hidden animate-panel-in"
-              >
-                <JobPanel
-                  activeFile={activeFile}
-                  jobDescription={jobDescription ?? ""}
-                  analysis={fitAnalysis}
-                  analysisLoading={fitLoading}
-                  analysisError={fitError}
-                  analysisStale={
-                    !!fitAnalysis &&
-                    (!fitAnalysisKey ||
-                      fitAnalysisKey.docId !== activeFile.id ||
-                      fitAnalysisKey.jobKey !== (activeFile.jobKey ?? null) ||
-                      fitAnalysisKey.markdownHash !== markdownHash(markdown))
-                  }
-                  urlFetchLoading={urlFetchLoading}
-                  urlFetchError={urlFetchError}
-                  summaryLoading={summaryLoading}
-                  suggestionStatus={suggestionStatus}
-                  onJobChange={handleJobChange}
-                  onFetchUrl={handleFetchJobUrl}
-                  onAnalyze={handleAnalyzeJob}
-                  onTailor={handleTailorJob}
-                  onAcceptSuggestion={handleAcceptSuggestion}
-                  onRejectSuggestion={handleRejectSuggestion}
-                  onClearAnalysis={handleClearAnalysis}
-                />
-              </TabsPanel>
-            </Tabs>
+                <div className="flex items-center px-3 h-11 border-b border-border">
+                  <TabsList variant="pill" className="w-full">
+                    <TabsTab value="design" variant="pill">
+                      design
+                    </TabsTab>
+                    <TabsTab value="ai" variant="pill">
+                      ai
+                    </TabsTab>
+                    <TabsTab value="job" variant="pill">
+                      job
+                    </TabsTab>
+                  </TabsList>
+                </div>
+                <TabsPanel
+                  value="design"
+                  className="flex-1 min-h-0 flex flex-col data-[hidden]:hidden animate-panel-in"
+                >
+                  <DocEditorPanel mode={centerTab} />
+                </TabsPanel>
+                <TabsPanel
+                  value="ai"
+                  className="flex-1 min-h-0 flex flex-col data-[hidden]:hidden animate-panel-in"
+                >
+                  <AiPanel
+                    markdown={markdown}
+                    activeFile={activeFile}
+                    jobDescription={jobDescription}
+                    onEnsureVariant={ensureVariantForJob}
+                    onEnsureAiFork={ensureAiFork}
+                  />
+                </TabsPanel>
+                <TabsPanel
+                  value="job"
+                  className="flex-1 min-h-0 flex flex-col data-[hidden]:hidden animate-panel-in"
+                >
+                  <JobPanel
+                    activeFile={activeFile}
+                    jobDescription={jobDescription ?? ""}
+                    analysis={fitAnalysis}
+                    analysisLoading={fitLoading}
+                    analysisError={fitError}
+                    analysisStale={
+                      !!fitAnalysis &&
+                      (!fitAnalysisKey ||
+                        fitAnalysisKey.docId !== activeFile.id ||
+                        fitAnalysisKey.jobKey !== (activeFile.jobKey ?? null) ||
+                        fitAnalysisKey.markdownHash !== markdownHash(markdown))
+                    }
+                    urlFetchLoading={urlFetchLoading}
+                    urlFetchError={urlFetchError}
+                    summaryLoading={summaryLoading}
+                    suggestionStatus={suggestionStatus}
+                    onJobChange={handleJobChange}
+                    onFetchUrl={handleFetchJobUrl}
+                    onAnalyze={handleAnalyzeJob}
+                    onTailor={handleTailorJob}
+                    onAcceptSuggestion={handleAcceptSuggestion}
+                    onRejectSuggestion={handleRejectSuggestion}
+                    onClearAnalysis={handleClearAnalysis}
+                  />
+                </TabsPanel>
+              </Tabs>
+            </div>
           </aside>
         )}
       </div>
@@ -1075,9 +1107,13 @@ function SaveIndicator({
     state === "saving"
       ? "saving…"
       : state === "saved"
-        ? secondsAgo === null || secondsAgo < 1
+        ? secondsAgo === null || secondsAgo < 5
           ? "saved just now"
-          : `saved ${secondsAgo}s ago`
+          : secondsAgo < 60
+            ? "saved <1m ago"
+            : secondsAgo < 3600
+              ? `saved ${Math.floor(secondsAgo / 60)}m ago`
+              : `saved ${Math.floor(secondsAgo / 3600)}h ago`
         : "draft";
 
   return (
@@ -1125,7 +1161,7 @@ function EmptyState({
   return (
     <div className="flex-1 flex items-center justify-center p-6 bg-background">
       <div className="max-w-[480px] w-full flex flex-col gap-6">
-        <div className="flex items-baseline gap-3 select-none">
+        <div className="flex items-baseline gap-3 select-none animate-in fade-in slide-in-from-bottom-1 duration-200" style={{ animationFillMode: "both" }}>
           <span
             className="text-display-lg text-foreground tabular"
             data-tabular
@@ -1136,14 +1172,14 @@ function EmptyState({
             / no resume open
           </span>
         </div>
-        <h1 className="text-heading text-foreground font-semibold max-w-[32ch]">
+        <h1 className="text-heading text-foreground font-semibold max-w-[32ch] animate-in fade-in slide-in-from-bottom-1 duration-200" style={{ animationDelay: "50ms", animationFillMode: "both" }}>
           start blank, import a pdf, or let ai draft one from a role title.
         </h1>
-        <p className="text-sm text-muted-foreground max-w-[52ch] text-pretty leading-relaxed">
+        <p className="text-sm text-muted-foreground max-w-[52ch] text-pretty leading-relaxed animate-in fade-in slide-in-from-bottom-1 duration-200" style={{ animationDelay: "100ms", animationFillMode: "both" }}>
           local-first. your data lives in this browser. bring your own api key
           for ai assistance — anthropic, openai, gemini, grok, or openrouter.
         </p>
-        <div className="flex flex-wrap gap-2 pt-2">
+        <div className="flex flex-wrap gap-2 pt-2 animate-in fade-in slide-in-from-bottom-1 duration-200" style={{ animationDelay: "150ms", animationFillMode: "both" }}>
           <Button size="sm" onClick={onCreate} disabled={loading}>
             <Plus weight="light" className="size-3.5" />
             start blank
@@ -1160,7 +1196,7 @@ function EmptyState({
             </Badge>
           </Button>
         </div>
-        <div className="pt-4 border-t border-border flex flex-col gap-3">
+        <div className="pt-4 border-t border-border flex flex-col gap-3 animate-in fade-in slide-in-from-bottom-1 duration-200" style={{ animationDelay: "200ms", animationFillMode: "both" }}>
           <Button size="sm" variant="outline" onClick={onImportBackup} disabled={loading}>
             <DownloadSimple weight="light" className="size-3.5" />
             import backup (.json)

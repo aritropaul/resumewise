@@ -46,8 +46,7 @@ export function CenterTabs({
 
       <div className="relative min-h-0 flex-1">
         <div
-          className="absolute inset-0 flex justify-center"
-          hidden={tab !== "edit"}
+          className={`absolute inset-0 flex justify-center transition-opacity duration-150 ease-[var(--ease-ios)] ${tab === "edit" ? "opacity-100" : "opacity-0 pointer-events-none"}`}
           aria-hidden={tab !== "edit"}
         >
           <div className="h-full w-full max-w-[720px]">
@@ -67,8 +66,7 @@ export function CenterTabs({
           ) : null}
         </div>
         <div
-          className="absolute inset-0"
-          hidden={tab !== "preview"}
+          className={`absolute inset-0 transition-opacity duration-150 ease-[var(--ease-ios)] ${tab === "preview" ? "opacity-100" : "opacity-0 pointer-events-none"}`}
           aria-hidden={tab !== "preview"}
         >
           <ResumePreview markdown={markdown} theme={theme} template={template} />

@@ -43,7 +43,7 @@ export default function SignupPage() {
   }
 
   return (
-    <div className="w-full max-w-sm flex flex-col gap-6">
+    <div className="w-full max-w-sm flex flex-col gap-6 animate-in fade-in slide-in-from-bottom-2 duration-200" style={{ animationFillMode: "both" }}>
       <div className="text-center">
         <h1 className="font-serif text-2xl tracking-tight">Create account</h1>
         <p className="text-sm text-muted-foreground mt-1">
