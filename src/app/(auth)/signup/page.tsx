@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { authClient } from "@/lib/auth-client";
 import { toast } from "sonner";
+import { track } from "@/lib/analytics";
 
 export default function SignupPage() {
   const router = useRouter();
@@ -27,6 +28,7 @@ export default function SignupPage() {
         toast.error(error.message || "Sign up failed");
         return;
       }
+      track("signup");
       router.push("/app");
     } catch {
       toast.error("Sign up failed");
@@ -36,6 +38,7 @@ export default function SignupPage() {
   }
 
   async function handleGoogle() {
+    track("signup_google");
     await authClient.signIn.social({
       provider: "google",
       callbackURL: "/app",

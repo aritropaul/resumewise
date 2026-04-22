@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Script from "next/script";
 import { GeistSans } from "geist/font/sans";
 import { GeistMono } from "geist/font/mono";
 import { Instrument_Serif } from "next/font/google";
@@ -56,6 +57,11 @@ export default function RootLayout({
         {children}
         <Noise />
         <CustomToaster />
+        <Script
+          src="https://analythicc-6bn.pages.dev/tracker.js?site=981a26b55a23a129"
+          strategy="afterInteractive"
+          data-track-localhost
+        />
       </body>
     </html>
   );

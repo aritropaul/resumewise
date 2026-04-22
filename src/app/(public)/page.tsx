@@ -7,6 +7,7 @@ import {
   ShieldCheck,
   ArrowRight,
 } from "@phosphor-icons/react";
+import { track } from "@/lib/analytics";
 
 export default function LandingPage() {
   return (
@@ -17,12 +18,14 @@ export default function LandingPage() {
         <div className="flex items-center gap-3">
           <Link
             href="/login"
+            onClick={() => track("landing_login_click")}
             className="text-sm text-muted-foreground hover:text-foreground transition-colors"
           >
             log in
           </Link>
           <Link
             href="/signup"
+            onClick={() => track("landing_signup_click")}
             className="text-sm bg-foreground text-background px-4 py-1.5 rounded-md hover:opacity-90 transition-opacity"
           >
             sign up
@@ -41,6 +44,7 @@ export default function LandingPage() {
         </p>
         <Link
           href="/signup"
+          onClick={() => track("landing_cta_click")}
           className="inline-flex items-center gap-2 bg-foreground text-background px-6 py-2.5 rounded-md text-sm font-medium hover:opacity-90 transition-opacity animate-in fade-in slide-in-from-bottom-2 duration-200"
           style={{ animationDelay: "160ms", animationFillMode: "both" }}
         >

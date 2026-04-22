@@ -41,6 +41,7 @@ import { useResumeStore } from "@/lib/resume-store";
 import { DocEditorPanel } from "@/components/doc-editor-panel";
 import { downloadResumePdf } from "@/lib/download-pdf";
 import { cn } from "@/lib/utils";
+import { track } from "@/lib/analytics";
 import { UserMenu } from "@/components/user-menu";
 import { JobPanel, type SuggestionStatus } from "@/components/job-panel";
 import {
@@ -282,6 +283,7 @@ export default function Home() {
   );
 
   const handleCreateBlank = useCallback(() => {
+    track("doc_create");
     const doc = createBlankDocument("untitled resume");
     saveDocument(doc).catch((e) => console.error("Save failed", e));
     setFiles((prev) => [...prev, doc]);
@@ -325,6 +327,7 @@ export default function Home() {
         await saveDocument(doc);
         setFiles((prev) => [...prev, doc]);
         activateDoc(doc);
+        track("doc_import_pdf");
         toast.success(`imported ${baseName}`, { id: importToast });
       } catch (e) {
         console.error("Import failed", e);
@@ -376,6 +379,7 @@ export default function Home() {
         all.sort((a, b) => a.name.localeCompare(b.name));
         setFiles(all);
         if (all.length > 0) activateDoc(all[0]);
+        track("doc_import_backup");
         toast.success(`imported ${docs.length} document${docs.length === 1 ? "" : "s"}`, { id: importToast });
       } catch (e) {
         toast.error(`import failed: ${(e as Error).message}`, { id: importToast });
@@ -397,6 +401,7 @@ export default function Home() {
 
   const handleDuplicate = useCallback(
     (id: string, asVariant: boolean) => {
+      track(asVariant ? "doc_create_variant" : "doc_duplicate");
       const src = filesRef.current.find((f) => f.id === id);
       if (!src) return;
       const sourceDoc: SavedDocument =
@@ -424,6 +429,7 @@ export default function Home() {
 
   const handleDelete = useCallback(
     (id: string) => {
+      track("doc_delete");
       const target = filesRef.current.find((f) => f.id === id);
       if (!target) return;
       const ids = [
@@ -481,6 +487,7 @@ export default function Home() {
 
   const handleDownload = useCallback(async () => {
     if (!activeFile) return;
+    track("doc_download");
     setIsDownloading(true);
     try {
       await downloadResumePdf(
@@ -662,6 +669,7 @@ export default function Home() {
             })
             .catch((e) => console.error("Save failed", e));
         }, 200);
+        track("job_fetch_url");
         toast.success(
           result.company
             ? `loaded ${result.title ?? "role"} · ${result.company}`
@@ -718,6 +726,7 @@ export default function Home() {
         jobDescription: jd,
         jobKey: key.jobKey,
       });
+      track("job_analyze");
       setFitAnalysis(analysis);
       setFitAnalysisKey(key);
       setSuggestionStatus({});
@@ -737,6 +746,7 @@ export default function Home() {
     }
     const variant = await ensureVariantForJob();
     if (!variant) return;
+    track("ai_tailor");
     queueAiWorkflow(
       "tailor",
       "Tailor this resume to the target job. Focus on the summary, the strongest work bullets, and the most relevant skills."
@@ -760,6 +770,7 @@ export default function Home() {
         return;
       }
       store.setMarkdown(next);
+      track("suggestion_accept");
       setSuggestionStatus((prev) => ({ ...prev, [index]: "accepted" }));
       // Re-anchor the analysis key to the post-accept state so applying our own
       // suggestion doesn't mark the analysis stale and pull the user into a
@@ -774,6 +785,7 @@ export default function Home() {
   );
 
   const handleRejectSuggestion = useCallback((index: number) => {
+    track("suggestion_reject");
     setSuggestionStatus((prev) => ({ ...prev, [index]: "rejected" }));
   }, []);
 
@@ -1058,7 +1070,7 @@ export default function Home() {
           open={pickerOpen}
           onOpenChange={setPickerOpen}
           value={template}
-          onSelect={(id) => store.setTemplate(id)}
+          onSelect={(id) => { track("template_change"); store.setTemplate(id); }}
         />
       )}
       <CommandPalette

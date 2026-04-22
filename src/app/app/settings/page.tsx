@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { ArrowLeft, Trash, Plus, Key } from "@phosphor-icons/react";
 import { toast } from "sonner";
+import { track } from "@/lib/analytics";
 import type { Provider } from "@/lib/ai";
 
 interface KeyMeta {
@@ -50,6 +51,7 @@ export default function SettingsPage() {
         toast.error(err.error || "Failed to save key");
         return;
       }
+      track("key_save");
       toast.success(`${provider} key saved`);
       setAdding(null);
       setNewKey("");
@@ -65,6 +67,7 @@ export default function SettingsPage() {
     try {
       const res = await fetch(`/api/keys?provider=${provider}`, { method: "DELETE" });
       if (res.ok) {
+        track("key_delete");
         toast.success(`${provider} key removed`);
         loadKeys();
       }

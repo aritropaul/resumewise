@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { authClient } from "@/lib/auth-client";
 import { toast } from "sonner";
+import { track } from "@/lib/analytics";
 
 export default function LoginPage() {
   return (
@@ -32,6 +33,7 @@ function LoginForm() {
         toast.error(error.message || "Sign in failed");
         return;
       }
+      track("login");
       router.push(redirect);
     } catch {
       toast.error("Sign in failed");
@@ -41,6 +43,7 @@ function LoginForm() {
   }
 
   async function handleGoogle() {
+    track("login_google");
     await authClient.signIn.social({
       provider: "google",
       callbackURL: redirect,

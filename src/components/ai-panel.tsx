@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { BezelCard } from "@/components/ui/card";
 import { AiDiffView } from "@/components/ai-diff-view";
 import { useResumeStore } from "@/lib/resume-store";
+import { track } from "@/lib/analytics";
 import type { SavedDocument } from "@/lib/storage";
 import {
   applyDecisions,
@@ -111,6 +112,7 @@ export function AiPanel({
       expectedForkIdRef.current = ok.id;
     }
 
+    track(mode === "tailor" ? "ai_tailor" : mode === "analyze" ? "ai_analyze" : "ai_chat");
     const userTurn: ChatTurn = { role: "user", content: prompt };
     const nextTurns = [...turns, userTurn];
     setTurns(nextTurns);
@@ -293,6 +295,7 @@ export function AiPanel({
 
   const applyHunks = () => {
     if (!hunks || !candidateMarkdown) return;
+    track("ai_apply");
     const result = applyDecisions(markdown, candidateMarkdown, decisions);
     setMarkdown(result);
     replaceMarkdown(result);
