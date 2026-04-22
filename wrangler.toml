@@ -5,7 +5,7 @@ compatibility_flags = ["nodejs_compat"]
 [[d1_databases]]
 binding = "DB"
 database_name = "resumewise-prod"
-database_id = "placeholder-fill-after-d1-create"
+database_id = "50cf171b-0931-4bf7-a254-660ce9754948"
 
 [vars]
 ENVIRONMENT = "production"

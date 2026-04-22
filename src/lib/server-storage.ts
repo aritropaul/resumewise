@@ -1,6 +1,6 @@
 // Storage abstraction — dual backend.
 // Local dev: better-sqlite3 at ~/.resumewise/resumewise.db
-// Cloudflare: D1 binding via @opennextjs/cloudflare
+// Production: Cloudflare D1 via HTTP API (works from Vercel or anywhere)
 //
 // All methods are async. The sqlite backend wraps sync calls in promises
 // so the interface is uniform.
@@ -210,33 +210,93 @@ function getSqliteBackend(): StorageBackend {
   return _sqliteBackend;
 }
 
-// ---------- D1 backend (Cloudflare) ----------
+// ---------- D1 HTTP API backend (production — works from Vercel) ----------
 
-function getD1Backend(db: D1Database): StorageBackend {
+interface D1Response {
+  result: Array<{ results: DocRow[] }>;
+  success: boolean;
+  errors: Array<{ message: string }>;
+}
+
+function getD1Config() {
+  const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
+  const databaseId = process.env.CLOUDFLARE_D1_DATABASE_ID;
+  const apiToken = process.env.CLOUDFLARE_API_TOKEN;
+  if (!accountId || !databaseId || !apiToken) return null;
+  return { accountId, databaseId, apiToken };
+}
+
+async function d1Query(
+  config: { accountId: string; databaseId: string; apiToken: string },
+  sql: string,
+  params: unknown[] = []
+): Promise<DocRow[]> {
+  const url = `https://api.cloudflare.com/client/v4/accounts/${config.accountId}/d1/database/${config.databaseId}/query`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${config.apiToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ sql, params }),
+  });
+  const data = (await res.json()) as D1Response;
+  if (!data.success) {
+    throw new Error(data.errors?.[0]?.message || "D1 query failed");
+  }
+  return data.result?.[0]?.results ?? [];
+}
+
+async function d1Exec(
+  config: { accountId: string; databaseId: string; apiToken: string },
+  sql: string,
+  params: unknown[] = []
+): Promise<void> {
+  const url = `https://api.cloudflare.com/client/v4/accounts/${config.accountId}/d1/database/${config.databaseId}/query`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${config.apiToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ sql, params }),
+  });
+  const data = (await res.json()) as D1Response;
+  if (!data.success) {
+    throw new Error(data.errors?.[0]?.message || "D1 exec failed");
+  }
+}
+
+function getD1HttpBackend(config: {
+  accountId: string;
+  databaseId: string;
+  apiToken: string;
+}): StorageBackend {
   return {
     async loadAll(userId: string) {
-      const { results } = await db
-        .prepare("SELECT * FROM documents WHERE user_id = ?")
-        .bind(userId)
-        .all<DocRow>();
-      return (results ?? []).map(rowToDoc);
+      const rows = await d1Query(
+        config,
+        "SELECT * FROM documents WHERE user_id = ?",
+        [userId]
+      );
+      return rows.map(rowToDoc);
     },
     async upsert(userId: string, doc: Record<string, unknown>) {
       const p = docToParams(doc, userId);
-      await db.prepare(UPSERT_SQL).bind(...paramValues(p)).run();
+      await d1Exec(config, UPSERT_SQL, paramValues(p));
     },
     async upsertMany(userId: string, docs: Record<string, unknown>[]) {
-      const stmts = docs.map((doc) => {
+      for (const doc of docs) {
         const p = docToParams(doc, userId);
-        return db.prepare(UPSERT_SQL).bind(...paramValues(p));
-      });
-      await db.batch(stmts);
+        await d1Exec(config, UPSERT_SQL, paramValues(p));
+      }
     },
     async remove(userId: string, id: string) {
-      await db
-        .prepare("DELETE FROM documents WHERE id = ? AND user_id = ?")
-        .bind(id, userId)
-        .run();
+      await d1Exec(
+        config,
+        "DELETE FROM documents WHERE id = ? AND user_id = ?",
+        [id, userId]
+      );
     },
   };
 }
@@ -244,15 +304,10 @@ function getD1Backend(db: D1Database): StorageBackend {
 // ---------- backend resolution ----------
 
 export async function getStorage(): Promise<StorageBackend> {
-  // Try Cloudflare D1 first
-  try {
-    const { getCloudflareContext } = await import("@opennextjs/cloudflare");
-    const { env } = await getCloudflareContext();
-    if (env?.DB) {
-      return getD1Backend(env.DB as D1Database);
-    }
-  } catch {
-    // Not on Cloudflare — fall through to sqlite
+  // Production: D1 HTTP API (works from Vercel)
+  const d1Config = getD1Config();
+  if (d1Config) {
+    return getD1HttpBackend(d1Config);
   }
 
   // Local dev: better-sqlite3

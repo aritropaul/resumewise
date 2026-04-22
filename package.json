@@ -11,10 +11,7 @@
     "test:inline": "tsx scripts/test-resume-inline.ts",
     "test:edits": "tsx scripts/test-resume-md-edits.ts",
     "test:smoke": "npm run test:md && npm run test:inline && npm run test:edits",
-    "cf:build": "opennextjs-cloudflare",
-    "cf:preview": "opennextjs-cloudflare && wrangler pages dev .worker.next",
-    "cf:deploy": "opennextjs-cloudflare && wrangler pages deploy .worker.next",
-    "d1:migrate": "wrangler d1 migrations apply resumewise-prod"
+    "d1:migrate": "wrangler d1 migrations apply resumewise-prod --remote"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.80.0",
@@ -50,7 +47,6 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260421.1",
-    "@opennextjs/cloudflare": "^1.19.3",
     "@tailwindcss/postcss": "^4",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^20",

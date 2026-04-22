@@ -112,38 +112,95 @@ function getSqliteKeyBackend(): KeyStorageBackend {
   return _sqliteBackend;
 }
 
-// -- D1 backend (Cloudflare) --
+// -- D1 HTTP API backend (production) --
 
-function getD1KeyBackend(d1: D1Database): KeyStorageBackend {
+interface D1Resp<T> {
+  result: Array<{ results: T[] }>;
+  success: boolean;
+  errors: Array<{ message: string }>;
+}
+
+function getD1Config() {
+  const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
+  const databaseId = process.env.CLOUDFLARE_D1_DATABASE_ID;
+  const apiToken = process.env.CLOUDFLARE_API_TOKEN;
+  if (!accountId || !databaseId || !apiToken) return null;
+  return { accountId, databaseId, apiToken };
+}
+
+async function d1KeyQuery<T>(
+  config: { accountId: string; databaseId: string; apiToken: string },
+  sql: string,
+  params: unknown[] = []
+): Promise<T[]> {
+  const url = `https://api.cloudflare.com/client/v4/accounts/${config.accountId}/d1/database/${config.databaseId}/query`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${config.apiToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ sql, params }),
+  });
+  const data = (await res.json()) as D1Resp<T>;
+  if (!data.success) throw new Error(data.errors?.[0]?.message || "D1 query failed");
+  return data.result?.[0]?.results ?? [];
+}
+
+async function d1KeyExec(
+  config: { accountId: string; databaseId: string; apiToken: string },
+  sql: string,
+  params: unknown[] = []
+): Promise<void> {
+  const url = `https://api.cloudflare.com/client/v4/accounts/${config.accountId}/d1/database/${config.databaseId}/query`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${config.apiToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ sql, params }),
+  });
+  const data = (await res.json()) as D1Resp<unknown>;
+  if (!data.success) throw new Error(data.errors?.[0]?.message || "D1 exec failed");
+}
+
+function getD1KeyHttpBackend(config: {
+  accountId: string;
+  databaseId: string;
+  apiToken: string;
+}): KeyStorageBackend {
   return {
     async save(userId, provider, plaintextKey) {
       const master = getMasterKey();
       const { ciphertext, iv } = await encryptApiKey(plaintextKey, master);
       const id = crypto.randomUUID();
-      await d1.prepare(`
+      await d1KeyExec(config, `
         INSERT INTO api_keys (id, user_id, provider, encrypted_key, iv, key_prefix)
         VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(user_id, provider) DO UPDATE SET
           encrypted_key=excluded.encrypted_key, iv=excluded.iv,
           key_prefix=excluded.key_prefix, updated_at=datetime('now')
-      `).bind(id, userId, provider, ciphertext, iv, keyPrefix(plaintextKey)).run();
+      `, [id, userId, provider, ciphertext, iv, keyPrefix(plaintextKey)]);
     },
 
     async get(userId, provider) {
-      const row = await d1
-        .prepare("SELECT encrypted_key, iv FROM api_keys WHERE user_id = ? AND provider = ?")
-        .bind(userId, provider)
-        .first<{ encrypted_key: string; iv: string }>();
-      if (!row) return null;
-      return decryptApiKey(row.encrypted_key, row.iv, getMasterKey());
+      const rows = await d1KeyQuery<{ encrypted_key: string; iv: string }>(
+        config,
+        "SELECT encrypted_key, iv FROM api_keys WHERE user_id = ? AND provider = ?",
+        [userId, provider]
+      );
+      if (rows.length === 0) return null;
+      return decryptApiKey(rows[0].encrypted_key, rows[0].iv, getMasterKey());
     },
 
     async listMeta(userId) {
-      const { results } = await d1
-        .prepare("SELECT provider, key_prefix, created_at FROM api_keys WHERE user_id = ? ORDER BY created_at")
-        .bind(userId)
-        .all<{ provider: string; key_prefix: string; created_at: string }>();
-      return (results ?? []).map((r) => ({
+      const rows = await d1KeyQuery<{ provider: string; key_prefix: string; created_at: string }>(
+        config,
+        "SELECT provider, key_prefix, created_at FROM api_keys WHERE user_id = ? ORDER BY created_at",
+        [userId]
+      );
+      return rows.map((r) => ({
         provider: r.provider,
         keyPrefix: r.key_prefix,
         createdAt: r.created_at,
@@ -151,10 +208,11 @@ function getD1KeyBackend(d1: D1Database): KeyStorageBackend {
     },
 
     async remove(userId, provider) {
-      await d1
-        .prepare("DELETE FROM api_keys WHERE user_id = ? AND provider = ?")
-        .bind(userId, provider)
-        .run();
+      await d1KeyExec(
+        config,
+        "DELETE FROM api_keys WHERE user_id = ? AND provider = ?",
+        [userId, provider]
+      );
     },
   };
 }
@@ -162,14 +220,7 @@ function getD1KeyBackend(d1: D1Database): KeyStorageBackend {
 // ---------- Backend resolution ----------
 
 export async function getKeyStorage(): Promise<KeyStorageBackend> {
-  try {
-    const { getCloudflareContext } = await import("@opennextjs/cloudflare");
-    const { env } = await getCloudflareContext();
-    if (env?.DB) {
-      return getD1KeyBackend(env.DB as D1Database);
-    }
-  } catch {
-    // Not on Cloudflare
-  }
+  const d1Config = getD1Config();
+  if (d1Config) return getD1KeyHttpBackend(d1Config);
   return getSqliteKeyBackend();
 }
