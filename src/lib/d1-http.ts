@@ -51,9 +51,19 @@ class D1HttpPreparedStatement {
     return data;
   }
 
-  async all<T = Record<string, unknown>>(): Promise<{ results: T[] }> {
+  async all<T = Record<string, unknown>>(): Promise<{
+    results: T[];
+    meta: { changes: number; last_row_id: number | null };
+  }> {
     const data = await this.execute();
-    return { results: (data.result?.[0]?.results ?? []) as T[] };
+    const entry = data.result?.[0];
+    return {
+      results: (entry?.results ?? []) as T[],
+      meta: {
+        changes: (entry?.meta?.changes as number) ?? 0,
+        last_row_id: (entry?.meta?.last_row_id as number) ?? null,
+      },
+    };
   }
 
   async first<T = Record<string, unknown>>(): Promise<T | null> {
@@ -83,10 +93,13 @@ export class D1HttpDatabase {
     return new D1HttpPreparedStatement(this.config, sql);
   }
 
-  async batch(statements: D1HttpPreparedStatement[]): Promise<unknown[]> {
+  async batch(
+    statements: D1HttpPreparedStatement[]
+  ): Promise<Array<{ results: Record<string, unknown>[] }>> {
     const results = [];
     for (const stmt of statements) {
-      results.push(await stmt.run());
+      const r = await stmt.all();
+      results.push(r);
     }
     return results;
   }
