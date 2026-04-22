@@ -17,6 +17,8 @@ CREATE TABLE IF NOT EXISTS session (
   userId TEXT NOT NULL REFERENCES user(id) ON DELETE CASCADE,
   expiresAt TEXT NOT NULL,
   token TEXT NOT NULL UNIQUE,
+  ipAddress TEXT,
+  userAgent TEXT,
   createdAt TEXT NOT NULL DEFAULT (datetime('now')),
   updatedAt TEXT NOT NULL DEFAULT (datetime('now'))
 );
